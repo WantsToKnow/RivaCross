@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(where nmake *)",
+      "Bash(where cl *)",
+      "Bash(where g++)",
+      "Bash(where mingw32-make *)",
+      "Read(//c/Program Files/**)",
+      "Bash(ls \"C:/Program Files \\(x86\\)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/\" 2>/dev/null)",
+      "Read(//c/Program Files \\\\\\(x86\\\\\\)/Microsoft Visual Studio/2022/BuildTools/VC/Auxiliary/Build/**)"
+    ]
+  }
+}
