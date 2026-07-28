@@ -48,7 +48,8 @@ void helpCommands(RenderPassState* state) {
 	printw("M - set the crosshair position\n");
 	printw("U - retransmit the current config to RTSS\n");
 	printw("H - configure global hotkey toggle\n");
-	state->linesFilled += 12;
+	printw("K - configure master toggle (disables hotkey when off)\n");
+	state->linesFilled += 13;
 }
 
 void helpActiveConfig(RTSSCrossConfig* config, HotkeyState* hs, RenderPassState* state) {
@@ -70,7 +71,20 @@ void helpActiveConfig(RTSSCrossConfig* config, HotkeyState* hs, RenderPassState*
 	} else {
 		printw("Hotkey: disabled\n");
 	}
-	state->linesFilled += 6;
+	// Master toggle status
+	if (hs != NULL && hs->masterKeyCode != 0) {
+		char keyName[32];
+		hotkeyVkCodeToName(hs->masterKeyCode, keyName, sizeof(keyName));
+		char modPrefix[32] = "";
+		if (hs->masterModifierMask & 1) strcat(modPrefix, "Ctrl+");
+		if (hs->masterModifierMask & 2) strcat(modPrefix, "Shift+");
+		if (hs->masterModifierMask & 4) strcat(modPrefix, "Alt+");
+		printw("Master: %s%s (%s)\n", modPrefix, keyName,
+			hs->masterEnabled ? "ON" : "OFF");
+	} else {
+		printw("Master: not set\n");
+	}
+	state->linesFilled += 7;
 }
 
 bool initConfig(RTSSCrossConfig* config) {
@@ -188,6 +202,16 @@ int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 						hs->modifierMask = modifierMask;
 					}
 				}
+				// line 9: master toggle key code (optional, defaults to 0)
+				content = fgets(line, sizeof(line), file);
+				if (content && sscanf(content, "%i", &hotkeyCode) >= 1) {
+					hs->masterKeyCode = hotkeyCode;
+					// line 10: master toggle modifier mask
+					content = fgets(line, sizeof(line), file);
+					if (content && sscanf(content, "%i", &hotkeyMode) >= 1) {
+						hs->masterModifierMask = hotkeyMode;
+					}
+				}
 			}
 		}
 	}
@@ -286,6 +310,9 @@ bool pollUserAction(CrossActionArgs* args) {
 		case 'h':
 			args->action = CrossActionType::ConfigHotkey;
 			break;
+		case 'k':
+			args->action = CrossActionType::ConfigMasterHotkey;
+			break;
 		// move
 		case KEY_UP:
 			args->deltaY = -1;
@@ -383,6 +410,9 @@ bool processUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPas
 		break;
 	case CrossActionType::ConfigHotkey:
 		changed = processHotkeyUserAction(args, config, state);
+		break;
+	case CrossActionType::ConfigMasterHotkey:
+		changed = processMasterHotkeyUserAction(args, config, state);
 		break;
 	default:
 		break;
@@ -658,6 +688,9 @@ bool processLoadUserAction(CrossActionArgs* args, RTSSCrossConfig* config, Rende
 		state->linesFilled += 1;
 		return false;
 	}
+	// Remember the loaded config name for auto-save
+	strncpy(g_activeConfigName, inputBuffer, sizeof(g_activeConfigName) - 1);
+	g_activeConfigName[sizeof(g_activeConfigName) - 1] = '\0';
 	return true;
 }
 bool processHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state) {
@@ -697,7 +730,7 @@ bool processHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, Ren
 	// Poll for key press using GetAsyncKeyState (works globally)
 	int pressedKey = 0;
 	int pressedModifiers = 0;
-	const int VK_MODIFIERS[] = { VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN, VK_CAPITAL, VK_NUMLOCK, VK_SCROLL };
+	const int VK_MODIFIERS[] = { VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN };
 	const int SKIP_VK[] = { VK_XBUTTON1, VK_XBUTTON2 };
 
 	int pollCount = 0;
@@ -830,6 +863,124 @@ bool processHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, Ren
 	return changed;
 }
 
+bool processMasterHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state) {
+	args->action = CrossActionType::None;
+	HotkeyState* hs = args->hotkeyState;
+	if (hs == NULL) {
+		printw("Internal error: hotkey state not available\n");
+		state->linesFilled += 1;
+		return false;
+	}
+
+	// Show current master toggle state
+	if (hs->masterKeyCode != 0) {
+		char keyName[32];
+		hotkeyVkCodeToName(hs->masterKeyCode, keyName, sizeof(keyName));
+		char modPrefix[32] = "";
+		if (hs->masterModifierMask & 1) strcat(modPrefix, "Ctrl+");
+		if (hs->masterModifierMask & 2) strcat(modPrefix, "Shift+");
+		if (hs->masterModifierMask & 4) strcat(modPrefix, "Alt+");
+		printw("Current master toggle: %s%s (%s)\n", modPrefix, keyName,
+			hs->masterEnabled ? "ON" : "OFF");
+	} else {
+		printw("Master toggle: not set\n");
+	}
+	state->linesFilled += 1;
+
+	// Step 1: Capture key for master toggle
+	printw("Press key for master toggle (ESC cancel, BACKSPACE disable):\n");
+	state->linesFilled += 1;
+	refresh();
+
+	// Flush pending GetAsyncKeyState flags
+	for (int vk = 0x01; vk <= 0xFE; vk++) {
+		GetAsyncKeyState(vk);
+	}
+
+	const int VK_MODIFIERS[] = { VK_CONTROL, VK_SHIFT, VK_MENU, VK_LWIN, VK_RWIN };
+	const int SKIP_VK[] = { VK_XBUTTON1, VK_XBUTTON2 };
+
+	int pressedKey = 0;
+	int pressedModifiers = 0;
+	int pollCount = 0;
+	while (pressedKey == 0 && pollCount < 500) {
+		if (GetAsyncKeyState(VK_ESCAPE) & 0x0001) {
+			printw("Master toggle configuration cancelled\n");
+			state->linesFilled += 1;
+			return false;
+		}
+		if (GetAsyncKeyState(VK_BACK) & 0x0001) {
+			hs->masterKeyCode = 0;
+			hs->masterModifierMask = 0;
+			hs->masterEnabled = true;
+			printw("Master toggle disabled\n");
+			state->linesFilled += 1;
+			return true;
+		}
+		for (int vk = 0x01; vk <= 0xFE; vk++) {
+			if (!(GetAsyncKeyState(vk) & 0x0001)) continue;
+			bool isModifier = false;
+			for (int m = 0; m < sizeof(VK_MODIFIERS) / sizeof(VK_MODIFIERS[0]); m++) {
+				if (vk == VK_MODIFIERS[m]) { isModifier = true; break; }
+			}
+			if (isModifier) continue;
+			bool isMouse = false;
+			for (int m = 0; m < sizeof(SKIP_VK) / sizeof(SKIP_VK[0]); m++) {
+				if (vk == SKIP_VK[m]) { isMouse = true; break; }
+			}
+			if (isMouse) continue;
+			pressedKey = vk;
+			break;
+		}
+		if (pressedKey != 0) {
+			if (GetAsyncKeyState(VK_CONTROL) & 0x8000) pressedModifiers |= 1;
+			if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) pressedModifiers |= 2;
+			if (GetAsyncKeyState(VK_MENU)    & 0x8000) pressedModifiers |= 4;
+		}
+		Sleep(20);
+		pollCount++;
+		refresh();
+	}
+
+	if (pressedKey == 0) {
+		printw("No key detected (timeout); use config file for manual setup\n");
+		state->linesFilled += 1;
+		return false;
+	}
+
+	char keyName[32];
+	hotkeyVkCodeToName(pressedKey, keyName, sizeof(keyName));
+	char modPrefix[32] = "";
+	if (pressedModifiers & 1) strcat(modPrefix, "Ctrl+");
+	if (pressedModifiers & 2) strcat(modPrefix, "Shift+");
+	if (pressedModifiers & 4) strcat(modPrefix, "Alt+");
+	printw("Master toggle set: %s%s\n", modPrefix, keyName);
+	state->linesFilled += 1;
+
+	hs->masterKeyCode = pressedKey;
+	hs->masterModifierMask = pressedModifiers;
+	hs->masterEnabled = true;
+	hs->masterPrevAsyncState = false;
+
+	// Save
+	printw("Save to config file? (y/n): ");
+	refresh();
+	echo();
+	char saveInput[8];
+	getnstr(saveInput, sizeof(saveInput) - 1);
+	if (saveInput[0] == 'y' || saveInput[0] == 'Y') {
+		char configPath[256];
+		makeConfigPath(g_activeConfigName, configPath);
+		if (saveConfigToFile(configPath, config, hs)) {
+			printw("Saved to %s\n", configPath);
+		} else {
+			printw("Failed to save\n");
+		}
+		state->linesFilled += 1;
+	}
+	return true;
+}
+
 bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 	if (configPath == NULL || config == NULL || hs == NULL) {
 		return false;
@@ -848,6 +999,9 @@ bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeySta
 	fprintf(file, "%d\n", (int)hs->mode);
 	fprintf(file, "%d\n", hs->keyCode);
 	fprintf(file, "%d\n", hs->modifierMask);
+	// Master toggle
+	fprintf(file, "%d\n", hs->masterKeyCode);
+	fprintf(file, "%d\n", hs->masterModifierMask);
 	fclose(file);
 	return true;
 }
@@ -958,9 +1112,44 @@ DWORD WINAPI hotkeyPollThread(LPVOID param) {
 			DispatchMessage(&msg);
 		}
 
-		if (tp->hs->mode != HotkeyNone && tp->hs->keyCode != 0) {
+		// --- Master toggle (always active, controls whether main hotkey works) ---
+		if (tp->hs->masterKeyCode != 0) {
+			SHORT mState = GetAsyncKeyState(tp->hs->masterKeyCode);
+			// Toggle keys (Caps/Num/Scroll Lock): use "was pressed" flag (0x0001)
+			// Regular keys: use "is currently down" flag (0x8000)
+			bool mKeyDown = (tp->hs->masterKeyCode == VK_CAPITAL ||
+			                 tp->hs->masterKeyCode == VK_NUMLOCK ||
+			                 tp->hs->masterKeyCode == VK_SCROLL)
+				? (mState & 0x0001) != 0
+				: (mState & 0x8000) != 0;
+			// Check master modifiers
+			if (mKeyDown) {
+				if (tp->hs->masterModifierMask & 1) {
+					if (!(GetAsyncKeyState(VK_CONTROL) & 0x8000)) mKeyDown = false;
+				}
+				if (tp->hs->masterModifierMask & 2) {
+					if (!(GetAsyncKeyState(VK_SHIFT) & 0x8000)) mKeyDown = false;
+				}
+				if (tp->hs->masterModifierMask & 4) {
+					if (!(GetAsyncKeyState(VK_MENU) & 0x8000)) mKeyDown = false;
+				}
+			}
+			// Toggle on rising edge
+			if (mKeyDown && !tp->hs->masterPrevAsyncState) {
+				tp->hs->masterEnabled = !tp->hs->masterEnabled;
+			}
+			tp->hs->masterPrevAsyncState = mKeyDown;
+		}
+
+		// --- Main hotkey (only active when master is enabled) ---
+		if (tp->hs->masterEnabled && tp->hs->mode != HotkeyNone && tp->hs->keyCode != 0) {
 			SHORT state = GetAsyncKeyState(tp->hs->keyCode);
-			bool keyDown = (state & 0x8000) != 0;
+			// Toggle keys (Caps/Num/Scroll Lock): use "was pressed" flag (0x0001)
+			bool keyDown = (tp->hs->keyCode == VK_CAPITAL ||
+			                tp->hs->keyCode == VK_NUMLOCK ||
+			                tp->hs->keyCode == VK_SCROLL)
+				? (state & 0x0001) != 0
+				: (state & 0x8000) != 0;
 
 			// Check required modifiers (extra modifiers don't block)
 			if (keyDown) {
@@ -1092,6 +1281,10 @@ CrossActionType runInteractiveProgram(RTSSCrossConfig* config, RenderPassState* 
 			if (hs != NULL) {
 				hs->visible = true;
 			}
+			// Auto-save config so settings persist across restarts
+			char configPath[256];
+			makeConfigPath(g_activeConfigName, configPath);
+			saveConfigToFile(configPath, config, hs);
 			lastVisible = (hs != NULL) ? hs->visible : true;
 		}
 		refresh();

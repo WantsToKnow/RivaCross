@@ -38,7 +38,8 @@ enum CrossActionType {
 	Tint,
 	Load,
 	Update,
-	ConfigHotkey
+	ConfigHotkey,
+	ConfigMasterHotkey
 };
 
 enum HotkeyMode {
@@ -54,6 +55,11 @@ typedef struct HotkeyState {
 	bool visible;          // current crosshair visibility
 	bool prevAsyncState;   // previous frame key state (for Toggle edge detection)
 	bool threadRunning;    // signal to hotkey polling thread to stop
+	// Master toggle: when disabled, main hotkey is ignored
+	int masterKeyCode;           // VK code for master toggle (0 = disabled)
+	int masterModifierMask;      // modifiers for master toggle
+	bool masterEnabled;          // current master state (true = hotkeys work)
+	bool masterPrevAsyncState;   // edge detection for master toggle
 } HotkeyState;
 
 typedef struct CrossActionArgs {
@@ -87,6 +93,7 @@ bool processTintUserAction(CrossActionArgs* args, RTSSCrossConfig* config, Rende
 bool processMoveUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
 bool processScaleUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
 bool processHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
+bool processMasterHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
 int imin(int i1, int i2);
 
 CrossActionType runInteractiveProgram(RTSSCrossConfig* config, RenderPassState* state, HotkeyState* hs);

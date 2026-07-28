@@ -46,7 +46,8 @@ int main(int argc, char** argv) {
 	RTSSCrossConfig config;
 	initConfig(&config);
 	HotkeyState hs = {
-		HotkeyNone, 0, 0, true, false, false
+		HotkeyNone, 0, 0, true, false, false,
+		0, 0, true, false
 	};
 	helpActiveConfig(&config, &hs, &state);
 	addch('\n');
