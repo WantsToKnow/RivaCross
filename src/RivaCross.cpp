@@ -49,7 +49,8 @@ void helpCommands(RenderPassState* state) {
 	printw("U - retransmit the current config to RTSS\n");
 	printw("H - configure global hotkey toggle\n");
 	printw("K - configure master toggle (disables hotkey when off)\n");
-	state->linesFilled += 13;
+	printw("B - clear the clipboard (press 3 times to confirm)\n");
+	state->linesFilled += 14;
 }
 
 void helpActiveConfig(RTSSCrossConfig* config, HotkeyState* hs, RenderPassState* state) {
@@ -313,6 +314,9 @@ bool pollUserAction(CrossActionArgs* args) {
 		case 'k':
 			args->action = CrossActionType::ConfigMasterHotkey;
 			break;
+		case 'b':
+			args->action = CrossActionType::BufferClear;
+			break;
 		// move
 		case KEY_UP:
 			args->deltaY = -1;
@@ -413,6 +417,9 @@ bool processUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPas
 		break;
 	case CrossActionType::ConfigMasterHotkey:
 		changed = processMasterHotkeyUserAction(args, config, state);
+		break;
+	case CrossActionType::BufferClear:
+		changed = processBufferClearUserAction(args, config, state);
 		break;
 	default:
 		break;
@@ -979,6 +986,40 @@ bool processMasterHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* confi
 		state->linesFilled += 1;
 	}
 	return true;
+}
+
+// Buffer clear uses a static press counter for the triple-press confirm.
+// Pressing B once/twice shows warnings; the third press actually clears.
+static int g_bufferClearPressCount = 0;
+
+bool processBufferClearUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state) {
+	args->action = CrossActionType::None;
+
+	g_bufferClearPressCount++;
+
+	if (g_bufferClearPressCount == 1) {
+		// First press: warning, no action
+		printw("WARNING: Pressing B again will CLEAR the clipboard!\n");
+		printw("Save anything important first. Press B once more to confirm.\n");
+		state->linesFilled += 2;
+		return false;
+	} else if (g_bufferClearPressCount == 2) {
+		// Second press: final warning
+		printw("FINAL WARNING: Press B ONE more time to CLEAR the clipboard!\n");
+		printw("This is your last chance. Press B to confirm clearing.\n");
+		state->linesFilled += 2;
+		return false;
+	} else {
+		// Third press: actually clear the clipboard
+		if (OpenClipboard(NULL)) {
+			EmptyClipboard();
+			CloseClipboard();
+		}
+		printw("Clipboard cleared!\n");
+		state->linesFilled += 1;
+		g_bufferClearPressCount = 0;
+		return false;
+	}
 }
 
 bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {

@@ -39,7 +39,8 @@ enum CrossActionType {
 	Load,
 	Update,
 	ConfigHotkey,
-	ConfigMasterHotkey
+	ConfigMasterHotkey,
+	BufferClear
 };
 
 enum HotkeyMode {
@@ -94,6 +95,7 @@ bool processMoveUserAction(CrossActionArgs* args, RTSSCrossConfig* config, Rende
 bool processScaleUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
 bool processHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
 bool processMasterHotkeyUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
+bool processBufferClearUserAction(CrossActionArgs* args, RTSSCrossConfig* config, RenderPassState* state);
 int imin(int i1, int i2);
 
 CrossActionType runInteractiveProgram(RTSSCrossConfig* config, RenderPassState* state, HotkeyState* hs);
