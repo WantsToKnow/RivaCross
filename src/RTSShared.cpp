@@ -30,11 +30,22 @@ int RTSSUpdateOSDEntry(const RTSSCrossConfig* config, const char* osdEntry) {
 		} else {
 			if ((sharedMem->dwSignature == 'RTSS') &&
 				(sharedMem->dwVersion >= 0x00020000)) {
+				bool locked = sharedMem->dwVersion < 0x0002000e;
+				if (!locked) {
+					for (int attempt = 0; attempt < 5; ++attempt) {
+						if (!_interlockedbittestandset(&sharedMem->dwBusy, 0)) {
+							locked = true;
+							break;
+						}
+						Sleep(1);
+					}
+				}
+				if (!locked) result = -4;
 				bool found = false;
 				// write in two passes
 				//1st pass : find previously captured OSD slot
 				//2nd pass : otherwise find the first unused OSD slot and capture it
-				for (int pass = 0; pass < 2; pass++) {
+				for (int pass = 0; locked && pass < 2; pass++) {
 					for (int entry = 1; entry < sharedMem->dwOSDArrSize; entry++) {
 						//allow primary OSD clients (i.e. EVGA Precision / MSI Afterburner) to use the first slot exclusively, so third party
 						//applications start scanning the slots from the second one
@@ -51,17 +62,7 @@ int RTSSUpdateOSDEntry(const RTSSCrossConfig* config, const char* osdEntry) {
 							if (sharedMem->dwVersion >= 0x00020007) {
 								//use extended text slot for v2.7 and higher shared memory, it allows displaying 4096 symbols
 								//instead of 256 for regular text slot
-								if (sharedMem->dwVersion >= 0x0002000e) {
-									//OSD locking is supported on v2.14 and higher shared memory
-									DWORD dwBusy = _interlockedbittestandset(&sharedMem->dwBusy, 0);
-									//bit 0 of this variable will be set if OSD is locked by renderer and cannot be refreshed atm
-									if (!dwBusy) {
-										lstrcpynA(pEntry->szOSDEx, targetText, sizeof(pEntry->szOSDEx) - 1);
-										sharedMem->dwBusy = 0;
-									}
-								} else {
-									lstrcpynA(pEntry->szOSDEx, targetText, sizeof(pEntry->szOSDEx) - 1);
-								}
+								lstrcpynA(pEntry->szOSDEx, targetText, sizeof(pEntry->szOSDEx) - 1);
 							} else {
 								lstrcpynA(pEntry->szOSD, targetText, sizeof(pEntry->szOSD) - 1);
 							}
@@ -75,6 +76,8 @@ int RTSSUpdateOSDEntry(const RTSSCrossConfig* config, const char* osdEntry) {
 						break;
 					}
 				}
+				if (locked && sharedMem->dwVersion >= 0x0002000e)
+					_interlockedbittestandreset(&sharedMem->dwBusy, 0);
 			} else {
 				// not the correct signature
 				result = -3;

@@ -1,16 +1,21 @@
+CXX = g++
 CXXFLAGS = -Iinclude -Wno-multichar
-LDDFLAGS = lib/pdcurses.a
-OBJS = obj/Main.o obj/RivaCross.o obj/RTSShared.o
-RM = rm
+WIN_LIBS = -luser32 -lgdi32 -lcomdlg32
+GUI_OBJS = obj/Main.o obj/Core.o obj/RTSShared.o
+CONSOLE_OBJS = obj/ConsoleMain.o obj/RivaCross.o obj/Core.o obj/RTSShared.o
 
 all: RivaCross.exe
 
-RivaCross.exe: $(OBJS)
-	$(CXX) -o $@ $^ $(LDDFLAGS)
-	
+RivaCross.exe: $(GUI_OBJS)
+	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS)
+
+console: RivaCrossConsole.exe
+
+RivaCrossConsole.exe: $(CONSOLE_OBJS)
+	$(CXX) -o $@ $^ lib/pdcurses.a $(WIN_LIBS)
+
 obj/%.o: src/%.cpp
 	$(CXX) -c $(CXXFLAGS) -o $@ $<
 
 clean:
-	$(RM) RivaCross.exe
-	$(RM) obj\*.obj
+	-rm -f RivaCross.exe RivaCrossConsole.exe obj/*.o

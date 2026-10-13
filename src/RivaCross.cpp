@@ -25,8 +25,8 @@ SOFTWARE.
 #include "stdafx.h"
 #include "RTSShared.h"
 #include "RivaCross.h"
+#include "curses.h"
 
-const char RivaCrossOSDEntryName[32] = "RivaCross_crosshair";
 static char g_activeConfigName[32] = "default";
 
 void helpWelcome(RenderPassState* state) {
@@ -88,153 +88,6 @@ void helpActiveConfig(RTSSCrossConfig* config, HotkeyState* hs, RenderPassState*
 	state->linesFilled += 7;
 }
 
-bool initConfig(RTSSCrossConfig* config) {
-	if (config == NULL) {
-		return false;
-	}
-	strcpy(config->crosshair, "O");
-	config->position[0] = 477;
-	config->position[1] = 265;
-	config->color[0] = 0xFF;
-	config->color[1] = 0xFF;
-	config->color[2] = 0xFF;
-	config->color[3] = 0xFF;
-	config->scale = 100;
-	return true;
-}
-int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
-	if (configPath == NULL || config == NULL) {
-		return -1;
-	}
-	// attempt to read from file
-	FILE* file = fopen(configPath, "r");
-	if (file == NULL) {
-		return -2;
-	}
-	bool complete = false;
-	char line[32];
-	char crosshair[32];
-	unsigned int posX, posY, scale;
-	unsigned int red, green, blue, alpha;
-	do {
-		// read crosshair line
-		char* content = fgets(line, sizeof(line), file);
-		if (!content) {
-			break;
-		}
-		// exclude everything from the first newline character
-		int lineLength = strlen(content);
-		int crosshairLength = 0;
-		for (; crosshairLength < lineLength; crosshairLength++) {
-			if (content[crosshairLength] == '\n' ||
-				content[crosshairLength] == '\r') {
-				break;
-			}
-		}
-		crosshairLength = imin(crosshairLength, sizeof(crosshair) - 1);
-		strncpy(crosshair, content, crosshairLength);
-		crosshair[crosshairLength] = '\0';
-		
-		// read position x
-		content = fgets(line, sizeof(line), file);
-		if (!content) {
-			break;
-		}
-		if (sscanf(content, "%i", &posX) < 1) {
-			break;
-		}
-		// read position y
-		content = fgets(line, sizeof(line), file);
-		if (!content) {
-			break;
-		}
-		if (sscanf(content, "%i", &posY) < 1) {
-			break;
-		}
-		// read scale
-		content = fgets(line, sizeof(line), file);
-		if (!content) {
-			break;
-		}
-		if (sscanf(content, "%i", &scale) < 1) {
-			break;
-		}
-		// read color
-		content = fgets(line, sizeof(line), file);
-		if (!content) {
-			break;
-		}
-		int colorLength = strlen(content);
-		// require red at index 1 and 2, green at 3 and 4 ...
-		if (colorLength < 7) {
-			break;
-		}
-		int colorNo = sscanf(content, "#%02x%02x%02x%02x", &red, &green, &blue, &alpha);
-		if (colorNo < 3) {
-			break;
-		}
-		else if (colorNo < 4) {
-			alpha = 0xFF;
-		}
-		complete = true;
-	} while (false);
-
-	// read optional hotkey configuration (lines 6-7)
-	if (hs != NULL && complete) {
-		int hotkeyMode = 0;
-		int hotkeyCode = 0;
-		// line 6: hotkey mode (0=none, 1=hold, 2=toggle)
-		char* content = fgets(line, sizeof(line), file);
-		if (content && sscanf(content, "%i", &hotkeyMode) >= 1) {
-			// line 7: hotkey VK code
-			content = fgets(line, sizeof(line), file);
-			if (content && sscanf(content, "%i", &hotkeyCode) >= 1) {
-				if (hotkeyMode >= HotkeyNone && hotkeyMode <= HotkeyToggle) {
-					hs->mode = (HotkeyMode)hotkeyMode;
-				}
-				hs->keyCode = hotkeyCode;
-				hs->visible = true;
-				hs->prevAsyncState = false;
-				// line 8: modifier mask (optional, defaults to 0)
-				content = fgets(line, sizeof(line), file);
-				if (content) {
-					int modifierMask = 0;
-					if (sscanf(content, "%i", &modifierMask) >= 1) {
-						hs->modifierMask = modifierMask;
-					}
-				}
-				// line 9: master toggle key code (optional, defaults to 0)
-				content = fgets(line, sizeof(line), file);
-				if (content && sscanf(content, "%i", &hotkeyCode) >= 1) {
-					hs->masterKeyCode = hotkeyCode;
-					// line 10: master toggle modifier mask
-					content = fgets(line, sizeof(line), file);
-					if (content && sscanf(content, "%i", &hotkeyMode) >= 1) {
-						hs->masterModifierMask = hotkeyMode;
-					}
-				}
-			}
-		}
-	}
-
-	fclose(file);
-	// apply values after reading successfully
-	if (complete) {
-
-		strncpy(config->crosshair, crosshair, imin(sizeof(config->crosshair) - 1, sizeof(crosshair) - 1));
-		config->crosshair[sizeof(config->crosshair) - 1] = '\0';
-		config->position[0] = posX;
-		config->position[1] = posY;
-		config->scale = scale;
-		config->color[0] = red;
-		config->color[1] = green;
-		config->color[2] = blue;
-		config->color[3] = alpha;
-		return 0;
-	} else {
-		return -3;
-	}
-}
 bool makeConfigPath(char* configName, char* configPath) {
 	if (configName == NULL || configPath == NULL) {
 		return false;
@@ -1022,89 +875,6 @@ bool processBufferClearUserAction(CrossActionArgs* args, RTSSCrossConfig* config
 	}
 }
 
-bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
-	if (configPath == NULL || config == NULL || hs == NULL) {
-		return false;
-	}
-	FILE* file = fopen(configPath, "w");
-	if (file == NULL) {
-		return false;
-	}
-	fprintf(file, "%s\n", config->crosshair);
-	fprintf(file, "%d\n", config->position[0]);
-	fprintf(file, "%d\n", config->position[1]);
-	fprintf(file, "%u\n", config->scale);
-	fprintf(file, "#%02x%02x%02x%02x\n",
-		config->color[0], config->color[1],
-		config->color[2], config->color[3]);
-	fprintf(file, "%d\n", (int)hs->mode);
-	fprintf(file, "%d\n", hs->keyCode);
-	fprintf(file, "%d\n", hs->modifierMask);
-	// Master toggle
-	fprintf(file, "%d\n", hs->masterKeyCode);
-	fprintf(file, "%d\n", hs->masterModifierMask);
-	fclose(file);
-	return true;
-}
-
-void hotkeyVkCodeToName(int vkCode, char* outName, int outNameSize) {
-	if (outName == NULL || outNameSize <= 0) return;
-
-	// Named keys
-	struct { int vk; const char* name; } namedKeys[] = {
-		{VK_LBUTTON,"MouseLeft"}, {VK_RBUTTON,"MouseRight"}, {VK_MBUTTON,"MouseMiddle"},
-		{VK_XBUTTON1,"MouseX1"},  {VK_XBUTTON2,"MouseX2"},
-		{VK_BACK,   "Backspace"}, {VK_TAB,    "Tab"},    {VK_RETURN, "Enter"},
-		{VK_ESCAPE, "Esc"},       {VK_SPACE,  "Space"},  {VK_PRIOR,  "PageUp"},
-		{VK_NEXT,   "PageDown"},  {VK_END,    "End"},    {VK_HOME,   "Home"},
-		{VK_LEFT,   "Left"},      {VK_UP,     "Up"},     {VK_RIGHT,  "Right"},
-		{VK_DOWN,   "Down"},      {VK_INSERT, "Insert"}, {VK_DELETE, "Delete"},
-		{VK_SNAPSHOT,"PrintScr"}, {VK_PAUSE,  "Pause"},  {VK_CAPITAL,"CapsLock"},
-		{VK_NUMLOCK,"NumLock"},   {VK_SCROLL, "ScrollLock"},
-		{VK_DIVIDE, "Num/"},      {VK_MULTIPLY,"Num*"},  {VK_SUBTRACT,"Num-"},
-		{VK_ADD,    "Num+"},      {VK_DECIMAL,"Num."},    {VK_OEM_PERIOD, "."},
-		{VK_OEM_COMMA, ","},      {VK_OEM_MINUS, "-"},    {VK_OEM_PLUS, "="},
-		{VK_OEM_1, ";"},         {VK_OEM_2, "/"},        {VK_OEM_3, "`"},
-		{VK_OEM_4, "["},         {VK_OEM_5, "\\"},       {VK_OEM_6, "]"},
-		{VK_OEM_7, "'"},         {0, NULL}
-	};
-
-	for (int i = 0; namedKeys[i].name != NULL; i++) {
-		if (vkCode == namedKeys[i].vk) {
-			strncpy(outName, namedKeys[i].name, outNameSize - 1);
-			outName[outNameSize - 1] = '\0';
-			return;
-		}
-	}
-
-	// Function keys F1-F24
-	if (vkCode >= VK_F1 && vkCode <= VK_F24) {
-		snprintf(outName, outNameSize, "F%d", vkCode - VK_F1 + 1);
-		return;
-	}
-
-	// Numpad 0-9
-	if (vkCode >= VK_NUMPAD0 && vkCode <= VK_NUMPAD9) {
-		snprintf(outName, outNameSize, "Num%d", vkCode - VK_NUMPAD0);
-		return;
-	}
-
-	// Letters A-Z
-	if (vkCode >= 'A' && vkCode <= 'Z') {
-		snprintf(outName, outNameSize, "%c", (char)vkCode);
-		return;
-	}
-
-	// Digits 0-9
-	if (vkCode >= '0' && vkCode <= '9') {
-		snprintf(outName, outNameSize, "%c", (char)vkCode);
-		return;
-	}
-
-	// Fallback: hex
-	snprintf(outName, outNameSize, "0x%02X", vkCode);
-}
-
 bool isHotkeyActive(HotkeyState* hs) {
 	if (hs == NULL || hs->mode == HotkeyNone || hs->keyCode == 0) {
 		return false;
@@ -1241,10 +1011,6 @@ void stopHotkeyThread(HotkeyState* hs) {
 	if (hs == NULL) return;
 	hs->threadRunning = false;
 	Sleep(30);
-}
-
-int imin(int i1, int i2) {
-	return i1 < i2 ? i1 : i2;
 }
 
 CrossActionType runInteractiveProgram(RTSSCrossConfig* config, RenderPassState* state, HotkeyState* hs) {

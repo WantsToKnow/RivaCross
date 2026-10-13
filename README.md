@@ -6,7 +6,7 @@ RivaTuner Statistics Server
 
 RivaCross makes use of a feature in RivaTuner Statistics Server (RTSS)
 that enables the addition of custom text to the RTSS on screen display (OSD).<br>
-It includes a simple text terminal user interface for crosshair customization.
+The Windows GUI lets you customize the crosshair without opening a console.
 
 Examples
 --------
@@ -22,16 +22,29 @@ Levels of usability may vary.
 Releases
 --------
 
-The current binary package of RivaCross is available in the 
-[Releases section](https://github.com/irseny/RivaCross/releases)
-([Direct download](https://github.com/irseny/RivaCross/releases/download/v0.5.1/RivaCross.Windows.64bit.zip)
+Older console builds are available in the
+[Releases section](https://github.com/irseny/RivaCross/releases).
+This checkout includes the Windows GUI executable.
 
 Usage
 -----
 
 1. Open MSI Afterburner / RivaTuner Statistics Server
-1. Execute RivaCross.exe
-1. For crosshair customization follow the instructions on screen
+1. Execute `RivaCross.exe`
+1. Edit the crosshair text, X/Y position, size, and RGBA color
+1. Click **Apply + Save** to update RTSS and save the active preset
+
+Use **Load** to switch presets and **Save As** to create one. The default preset
+is `config/default.txt` beside the executable. The window also provides
+**Show/Hide**, a clipboard clear action, and an option to leave the crosshair
+visible after exit. Configure a main hotkey in hold or toggle mode and an
+optional master toggle hotkey in the same window.
+Click a hotkey field and press a key or mouse button (left, right, middle, or
+side); Esc cancels and Backspace clears it.
+Keep the window open (it can be minimized) to use hotkeys. Closing it releases
+the RTSS overlay unless "Leave crosshair visible when closing" is checked.
+
+The previous text interface is available as the optional `RivaCrossConsole.exe` build.
 
 For bug reports or feature suggestions please use the 
 [Issues section](https://github.com/irseny/RivaCross/issues).
@@ -39,27 +52,25 @@ For bug reports or feature suggestions please use the
 Manual Build
 ------------
 
-If not done already initialize and update the PDCurses dependency:
-1. `git submodule update --init`
+From an MSVC developer command prompt, run `nmake` in the repository root.
+Alternatively, run `build.bat` from any directory. This builds the Windows GUI
+as `RivaCross.exe` using only Windows system libraries; PDCurses is not needed.
 
-Do a static build of the PDCurses library from a developer console:
-1. Navigate to `external/pdcurses/wincon`
-1. `nmake -f Makefile.vc WIDE=Y UTF8=Y`
-1. From there copy `pdcurses.lib` to the `lib` folder at the root of the repository
+To build the optional text interface, run `nmake console` or `build.bat console`.
+It produces `RivaCrossConsole.exe` and requires `lib/pdcurses.lib`. If the
+library is missing, run `git submodule update --init`, then build PDCurses in
+`external/pdcurses/wincon` with `nmake -f Makefile.vc WIDE=Y UTF8=Y` and copy
+`pdcurses.lib` to `lib`.
 
-Build RivaCross from a developer console:
-1. Navigate to the root of the repository
-1. `nmake`
-1. A successful build yields the console application `RivaCross.exe`
+With MinGW, run `mingw32-make -f Makefile.mingw` for the GUI. The optional
+`console` target additionally needs a MinGW-built `lib/pdcurses.a`.
 
 Limitations
 -----------
 * The crosshair is limited to one line of text
   - any further work in this direction is unlikely
-* The application does not necessarily understand all keys
+* The optional text interface does not necessarily understand all keys
   - probably a limitation of the technology and not easily fixable
-* The crosshair can only be moved when the configuration window is in focus
-  - enter the movement mode with M, then the crosshair can be moved while another windows is in focus
 * Availability of colorization and scaling features depend on RTSS rendering mode
   - try out a different rendering mode (Vector2D, Vector3D, Raster)
 * The crosshair positioning is not very fine grained
@@ -68,9 +79,8 @@ Limitations
   - no workaround so far (negative position values are not interpreted as such by RTSS)
 * Running the application multiple times does not yield multiple independent crosshairs
   - this behaviour exists for simplicity reasons and is required for the "hard exit" feature
-* Configuration presets must be created and modified manually in the `config` folder
+* Configuration presets are stored in the `config` folder
   - see [`config/HELPME.md`](config/HELPME.md) for formatting information
-  - a saving feature could be implemented if requested
 
 Credits
 -------
