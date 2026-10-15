@@ -55,20 +55,27 @@ use RTSS. Stock OCAT does not read this block or draw the custom crosshair.
 With `ocat/bin/gameoverlay64.dll` and `ocat/bin/DLLInjector64.exe` beside the
 GUI, click **Launch game...** and select a 64-bit game executable. The GUI
 starts it suspended, asks OCAT's injector to load the modified overlay, then
-resumes it even if injection fails. A success report from the injector does not
-prove the DLL loaded or the crosshair rendered. Games that require their own
-launcher may reject direct EXE launch. Keep RivaCrossOCAT open (it may be
+resumes it even if injection fails. Games that require their own launcher may
+reject direct EXE launch.
+
+For an already-running, unprotected D3D11 program, click **Attach running...**.
+The picker lists visible 64-bit processes that have loaded `d3d11.dll` and can
+be opened with the required process rights. Select one and look for `TEST` in
+its window. This list does not certify that the DLL can load or render. The
+injector's success report confirms only that remote `LoadLibraryW` returned a
+nonzero result; it does not prove that the crosshair rendered. Late attachment
+is currently implemented for D3D11 only. Keep RivaCrossOCAT open (it may be
 minimized) while playing. Closing the GUI hides the crosshair and releases the
-shared-memory block. Position uses a 960 x 540 reference grid. The GUI cannot
-verify whether a game actually displays the crosshair. The bundled DLL targets
-Direct3D 11 and 12; Vulkan is not included.
+shared-memory block. Position uses a 960 x 540 reference grid. The bundled
+DLL's launch-time renderer targets Direct3D 11 and 12; Vulkan is not included.
 
 The OCAT DLL currently draws a large red/yellow `TEST` label near the crosshair
 position (the screen center without the GUI), even if the crosshair is hidden.
 This temporary marker confirms only that the DLL reached the game's renderer.
-Steam-launched games are not injected by `RivaCrossOCAT.exe`, so the marker will
-not appear in Steam-launched CS2. Do not try to force the DLL into CS2 Trusted
-Mode: [Valve says targeted third-party injection can risk a VAC ban](https://help.steampowered.com/en/faqs/view/09A0-4879-4353-EF95).
+It stays visible until the target program exits, including after the GUI closes.
+Starting a game from Steam alone does not load this DLL. CS2 is excluded from
+both OCAT injection buttons. [Valve says targeted third-party injection into
+CS2 Trusted Mode can risk a VAC ban](https://help.steampowered.com/en/faqs/view/09A0-4879-4353-EF95).
 
 For bug reports or feature suggestions please use the 
 [Issues section](https://github.com/irseny/RivaCross/issues).

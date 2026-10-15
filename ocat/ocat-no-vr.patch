@@ -253,3 +253,28 @@ index d6648de..bdfe0b4 100644
      {
        freeDLL = true;
      }
+diff --git a/DLLInjector/DLLInjection.cpp b/DLLInjector/DLLInjection.cpp
+index 79e0250..d9666dd 100644
+--- a/DLLInjector/DLLInjection.cpp
++++ b/DLLInjector/DLLInjection.cpp
+@@ -251,13 +251,19 @@ bool DLLInjection::ExecuteRemoteThread(const std::string& functionName, void* fu
+-  WaitForSingleObject(remoteThread.Get(), INFINITE);
++  if (WaitForSingleObject(remoteThread.Get(), INFINITE) != WAIT_OBJECT_0) {
++    g_messageLog.LogError("DLLInjector", "WaitForSingleObject failed ",
++      GetLastError());
++    return false;
++  }
+   DWORD exitCode = 0;
+   if (!GetExitCodeThread(remoteThread.Get(), &exitCode))
+   {
+     g_messageLog.LogError("DLLInjector", "GetExitCodeThread failed ",
+       GetLastError());
++    return false;
+   }
+   if(!exitCode)
+   {
+     g_messageLog.LogError("DLLInjector", "Remote thread failed");
++    return false;
+   }
+   return true;
+ }

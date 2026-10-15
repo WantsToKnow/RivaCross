@@ -18,22 +18,30 @@ if (-not (Test-Path -LiteralPath (Join-Path $sdk 'Include\vulkan\vulkan.h'))) {
   throw "Vulkan headers not found under $sdk\Include"
 }
 
-foreach ($patchName in @('ocat-crosshair.patch', 'ocat-no-vr.patch')) {
-  $patch = Join-Path $PSScriptRoot $patchName
-  $ErrorActionPreference = 'Continue' # Windows PowerShell treats expected git stderr as an error.
-  & git -C $source apply --check $patch 2>$null
-  $canApply = $LASTEXITCODE -eq 0
-  $alreadyApplied = $false
-  if (-not $canApply) {
-    & git -C $source apply --reverse --check $patch 2>$null
-    $alreadyApplied = $LASTEXITCODE -eq 0
-  }
-  $ErrorActionPreference = 'Stop'
-  if ($canApply) {
-    & git -C $source apply $patch
-    if ($LASTEXITCODE -ne 0) { throw "Could not apply $patchName" }
-  } elseif (-not $alreadyApplied) {
-    throw "$patchName does not apply cleanly"
+$patchNames = @('ocat-crosshair.patch', 'ocat-no-vr.patch', 'ocat-late-d3d11.patch')
+# The last patch changes context used by the earlier ones; recognize a fully patched tree first.
+$ErrorActionPreference = 'Continue'
+& git -C $source apply --reverse --check (Join-Path $PSScriptRoot $patchNames[-1]) 2>$null
+$fullyPatched = $LASTEXITCODE -eq 0
+$ErrorActionPreference = 'Stop'
+if (-not $fullyPatched) {
+  foreach ($patchName in $patchNames) {
+    $patch = Join-Path $PSScriptRoot $patchName
+    $ErrorActionPreference = 'Continue' # Windows PowerShell treats expected git stderr as an error.
+    & git -C $source apply --check $patch 2>$null
+    $canApply = $LASTEXITCODE -eq 0
+    $alreadyApplied = $false
+    if (-not $canApply) {
+      & git -C $source apply --reverse --check $patch 2>$null
+      $alreadyApplied = $LASTEXITCODE -eq 0
+    }
+    $ErrorActionPreference = 'Stop'
+    if ($canApply) {
+      & git -C $source apply $patch
+      if ($LASTEXITCODE -ne 0) { throw "Could not apply $patchName" }
+    } elseif (-not $alreadyApplied) {
+      throw "$patchName does not apply cleanly"
+    }
   }
 }
 

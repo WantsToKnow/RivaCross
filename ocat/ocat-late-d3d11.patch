@@ -1,0 +1,278 @@
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index 9c0bc5b..bb4816b 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -29,9 +29,15 @@
+ #include "hook_manager.hpp"
+ #include "Utility/ProcessHelper.h"
+ #include "DXGIWrapper.h"
++#include "d3d11_renderer.hpp"
++#include <cwchar>
++#include <mutex>
++#include <unordered_map>
+ 
+ using namespace Microsoft::WRL;
+ 
++extern thread_local bool g_ocatWrappedPresent;
++
+ #define WRAP_DXGI 0
+ 
+ template <typename T>
+@@ -325,3 +331,191 @@ EXTERN_C HRESULT WINAPI D3D12CreateDevice(
+   
+   return hr;
+ }
++
++namespace {
++using PresentFn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT);
++using Present1Fn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain1 *, UINT, UINT,
++                                                  const DXGI_PRESENT_PARAMETERS *);
++using ResizeFn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain *, UINT, UINT, UINT,
++                                                DXGI_FORMAT, UINT);
++using Resize1Fn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain3 *, UINT, UINT, UINT,
++                                                 DXGI_FORMAT, UINT, const UINT *,
++                                                 IUnknown *const *);
++using ReleaseFn = ULONG(STDMETHODCALLTYPE *)(IDXGISwapChain *);
++
++// Intentionally process-lifetime: OCAT's DLL can be detached under the loader lock.
++auto &late_mutex() { static auto *mutex = new std::mutex; return *mutex; }
++auto &late_renderers() {
++  static auto *renderers = new std::unordered_map<IDXGISwapChain *,
++      std::unique_ptr<GameOverlay::d3d11_renderer>>;
++  return *renderers;
++}
++
++std::unique_ptr<GameOverlay::d3d11_renderer> take_late_renderer(IDXGISwapChain *chain)
++{
++  std::lock_guard<std::mutex> lock(late_mutex());
++  auto &renderers = late_renderers();
++  const auto it = renderers.find(chain);
++  if (it == renderers.end()) return nullptr;
++  auto renderer = std::move(it->second);
++  renderers.erase(it);
++  return renderer;
++}
++
++void draw_late_d3d11(IDXGISwapChain *chain, UINT flags)
++{
++  if (g_ocatWrappedPresent || (flags & DXGI_PRESENT_TEST)) return;
++  ComPtr<ID3D11Device> device;
++  if (FAILED(chain->GetDevice(IID_PPV_ARGS(&device)))) return;
++
++  std::lock_guard<std::mutex> lock(late_mutex());
++  auto &renderer = late_renderers()[chain];
++  if (!renderer) renderer = std::make_unique<GameOverlay::d3d11_renderer>(device.Get(), chain);
++  if (!renderer->HideOverlay()) renderer->on_present();
++}
++
++HRESULT STDMETHODCALLTYPE LatePresent(IDXGISwapChain *chain, UINT sync, UINT flags)
++{
++  draw_late_d3d11(chain, flags);
++  return GameOverlay::find_hook_trampoline(&LatePresent)(chain, sync, flags);
++}
++
++HRESULT STDMETHODCALLTYPE LatePresent1(IDXGISwapChain1 *chain, UINT sync, UINT flags,
++                                        const DXGI_PRESENT_PARAMETERS *parameters)
++{
++  draw_late_d3d11(chain, flags);
++  return GameOverlay::find_hook_trampoline(&LatePresent1)(chain, sync, flags, parameters);
++}
++
++HRESULT STDMETHODCALLTYPE LateResizeBuffers(IDXGISwapChain *chain, UINT count, UINT width,
++                                              UINT height, DXGI_FORMAT format, UINT flags)
++{
++  auto old = take_late_renderer(chain); // Release back-buffer views before DXGI resizes.
++  old.reset();
++  return GameOverlay::find_hook_trampoline(&LateResizeBuffers)(
++      chain, count, width, height, format, flags);
++}
++
++HRESULT STDMETHODCALLTYPE LateResizeBuffers1(IDXGISwapChain3 *chain, UINT count, UINT width,
++                                               UINT height, DXGI_FORMAT format, UINT flags,
++                                               const UINT *nodeMasks, IUnknown *const *queues)
++{
++  auto old = take_late_renderer(chain);
++  old.reset();
++  return GameOverlay::find_hook_trampoline(&LateResizeBuffers1)(
++      chain, count, width, height, format, flags, nodeMasks, queues);
++}
++
++ULONG STDMETHODCALLTYPE LateRelease(IDXGISwapChain *chain)
++{
++  const ULONG count = GameOverlay::find_hook_trampoline(&LateRelease)(chain);
++  // The renderer retains exactly one swapchain reference after the application lets go.
++  if (count == 1) {
++    auto old = take_late_renderer(chain);
++    old.reset();
++  }
++  return count;
++}
++
++bool in_system_dxgi(void *function)
++{
++  HMODULE owner = nullptr;
++  return function && GetModuleHandleExW(
++      GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++      reinterpret_cast<LPCWSTR>(function), &owner) && owner == GetModuleHandleW(L"dxgi.dll");
++}
++} // namespace
++
++// Called after DllMain returns. A temporary raw swapchain provides DXGI's shared vtable
++// entry points; existing swapchains use the same functions without being replaced.
++bool InstallLateD3D11Hook()
++{
++  // A not-yet-loaded D3D11 API will be covered by OCAT's existing factory hook.
++  if (!GetModuleHandleW(L"d3d11.dll")) return false;
++  const HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
++  const HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
++  if (!d3d11 || !dxgi) {
++    if (d3d11) FreeLibrary(d3d11);
++    return false;
++  }
++  WCHAR systemDir[MAX_PATH], expected[MAX_PATH], actual[MAX_PATH];
++  const UINT systemLength = GetSystemDirectoryW(systemDir, MAX_PATH);
++  const DWORD moduleLength = GetModuleFileNameW(dxgi, actual, MAX_PATH);
++  if (!systemLength || systemLength >= MAX_PATH || !moduleLength ||
++      moduleLength >= MAX_PATH ||
++      wcscpy_s(expected, systemDir) || wcscat_s(expected, L"\\dxgi.dll") ||
++      _wcsicmp(expected, actual)) {
++    FreeLibrary(d3d11);
++    return false;
++  }
++  using CreateDeviceFn = HRESULT(WINAPI *)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
++      UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
++      D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
++  using CreateFactoryFn = HRESULT(WINAPI *)(REFIID, void **);
++  const auto createDevice = reinterpret_cast<CreateDeviceFn>(
++      GetProcAddress(d3d11, "D3D11CreateDevice"));
++  const auto createFactory = reinterpret_cast<CreateFactoryFn>(
++      GetProcAddress(dxgi, "CreateDXGIFactory1"));
++  if (!createDevice || !createFactory) { FreeLibrary(d3d11); return false; }
++
++  ComPtr<ID3D11Device> device;
++  ComPtr<ID3D11DeviceContext> context;
++  ComPtr<IDXGIFactory1> factory;
++  ComPtr<IDXGISwapChain> chain;
++  HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 16, 16,
++                                nullptr, nullptr, nullptr, nullptr);
++  bool success = false;
++  if (window && SUCCEEDED(createDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, 0,
++          nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, &context)) &&
++      SUCCEEDED(createFactory(IID_PPV_ARGS(&factory)))) {
++    DXGI_SWAP_CHAIN_DESC desc{};
++    desc.BufferDesc.Width = 16;
++    desc.BufferDesc.Height = 16;
++    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    desc.SampleDesc.Count = 1;
++    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++    desc.BufferCount = 1;
++    desc.OutputWindow = window;
++    desc.Windowed = TRUE;
++    desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
++    using CreateSwapChainFn = HRESULT(STDMETHODCALLTYPE *)(IDXGIFactory *, IUnknown *,
++                                                            DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
++    auto original = reinterpret_cast<CreateSwapChainFn>(VTABLE(factory.Get())[10]);
++    if (original == &IDXGIFactory_CreateSwapChain)
++      original = GameOverlay::find_hook_trampoline(&IDXGIFactory_CreateSwapChain);
++    if (SUCCEEDED(original(factory.Get(), device.Get(), &desc, &chain))) {
++      void **vtable = *reinterpret_cast<void ***>(chain.Get());
++      void *present = vtable[8], *resize = vtable[13], *release = vtable[2];
++      ComPtr<IDXGISwapChain1> chain1;
++      ComPtr<IDXGISwapChain3> chain3;
++      chain.As(&chain1);
++      chain.As(&chain3);
++      void *present1 = chain1 ? VTABLE(chain1.Get())[22] : nullptr;
++      void *resize1 = chain3 ? VTABLE(chain3.Get())[39] : nullptr;
++      // A different overlay may have replaced a vtable entry. Never detour its code.
++      if (in_system_dxgi(present) && in_system_dxgi(resize) &&
++          in_system_dxgi(release) && (!present1 || in_system_dxgi(present1)) &&
++          (!resize1 || in_system_dxgi(resize1))) {
++        chain3.Reset(); chain1.Reset(); chain.Reset();
++        success = GameOverlay::install_hook(resize,
++            reinterpret_cast<GameOverlay::hook::address>(&LateResizeBuffers));
++        if (resize1) success = GameOverlay::install_hook(resize1,
++            reinterpret_cast<GameOverlay::hook::address>(&LateResizeBuffers1)) && success;
++        success = GameOverlay::install_hook(release,
++            reinterpret_cast<GameOverlay::hook::address>(&LateRelease)) && success;
++        if (success) {
++          success = GameOverlay::install_hook(present,
++              reinterpret_cast<GameOverlay::hook::address>(&LatePresent));
++          if (present1) success = GameOverlay::install_hook(present1,
++              reinterpret_cast<GameOverlay::hook::address>(&LatePresent1)) && success;
++        }
++      }
++    }
++  }
++  chain.Reset(); factory.Reset(); context.Reset(); device.Reset();
++  if (window) DestroyWindow(window);
++  FreeLibrary(d3d11);
++  g_messageLog.LogInfo("dxgi", success ? "Late D3D11 hooks installed" :
++                                     "Late D3D11 hooks unavailable");
++  return success;
++}
+diff --git a/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp b/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
+index bb9b207..4b8f682 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
+@@ -32,6 +32,7 @@
+ 
+ using namespace Microsoft::WRL;
+ extern bool g_uwpApp;
++thread_local bool g_ocatWrappedPresent = false;
+ 
+ #define KEY_DOWN(key) (key < 0 ? 0 : (GetAsyncKeyState(key) & 0x8000) != 0)
+ 
+@@ -305,7 +306,10 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::Present(UINT SyncInterval, UINT Flags)
+     }
+   }
+ 
++  const bool wasWrapped = g_ocatWrappedPresent;
++  g_ocatWrappedPresent = true;
+   HRESULT result = swapChain_->Present(SyncInterval, Flags);
++  g_ocatWrappedPresent = wasWrapped;
+ 
+   if (Flags != DXGI_PRESENT_TEST) {
+     mutex_.lock();
+@@ -434,8 +438,11 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::Present1(UINT SyncInterval, UINT Presen
+     }
+   }
+ 
++  const bool wasWrapped = g_ocatWrappedPresent;
++  g_ocatWrappedPresent = true;
+   HRESULT result = static_cast<IDXGISwapChain1 *>(swapChain_)
+                        ->Present1(SyncInterval, PresentFlags, pPresentParameters);
++  g_ocatWrappedPresent = wasWrapped;
+ 
+   if (PresentFlags != DXGI_PRESENT_TEST) {
+     mutex_.lock();
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index 6ceeae5..1ffa223 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -49,6 +49,13 @@ HHOOK g_hook = NULL;
+ std::wstring g_dllDirectory;
+ DenyList g_denyList;
+ bool g_uwpApp = false;
++extern bool InstallLateD3D11Hook();
++
++DWORD WINAPI InstallLateD3D11HookThread(LPVOID)
++{
++  InstallLateD3D11Hook();
++  return 0;
++}
+ 
+ extern "C" __declspec(dllexport) LRESULT CALLBACK
+ GlobalHookProc(int code, WPARAM wParam, LPARAM lParam)
+@@ -155,6 +162,12 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
+         // D3D12
+         GameOverlay::register_additional_module(L"d3d12.dll");
+ 
++        // Existing swapchains cannot be replaced by the factory creation hook.
++        // A worker avoids creating a D3D device while the loader lock is held.
++        HANDLE lateHookThread = CreateThread(nullptr, 0, InstallLateD3D11HookThread,
++                                             nullptr, 0, nullptr);
++        if (lateHookThread) CloseHandle(lateHookThread);
++
+       }
+       else
+       {

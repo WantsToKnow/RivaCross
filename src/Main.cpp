@@ -1,6 +1,7 @@
 #include "RivaCross.h"
 #ifdef RIVACROSS_OCAT
 #include "OCATShared.h"
+#include <tlhelp32.h>
 #endif
 
 #include <commdlg.h>
@@ -15,7 +16,7 @@
 enum ControlId {
 	IdCrosshair = 101, IdX, IdY, IdScale, IdColor, IdMode,
 	IdHotkey, IdMaster, IdLoad, IdSaveAs, IdApply, IdVisible,
-	IdClipboard, IdKeep, IdStatus, IdLaunch
+	IdClipboard, IdKeep, IdStatus, IdLaunch, IdAttach
 };
 
 #ifndef RIVACROSS_OCAT
@@ -243,18 +244,226 @@ static bool regularFile(const wchar_t* path) {
 		!(attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-static void launchGame() {
+static bool isCs2(const wchar_t* path) {
+	const wchar_t* slash = wcsrchr(path, L'\\');
+	return _wcsicmp(slash ? slash + 1 : path, L"cs2.exe") == 0;
+}
+
+static bool prepareOcat(wchar_t dll[MAX_PATH], wchar_t injector[MAX_PATH]) {
 	if (!OCATSharedOpen() || !OCATSharedUpdate(&app.config, app.hotkeyState.visible)) {
 		status("OCAT bridge unavailable. Close another RivaCrossOCAT.");
-		return;
+		return false;
 	}
-	wchar_t dll[MAX_PATH], injector[MAX_PATH];
 	if (!besideExe(dll, L"ocat\\bin\\gameoverlay64.dll") ||
 		!besideExe(injector, L"ocat\\bin\\DLLInjector64.exe") ||
 		!regularFile(dll) || !regularFile(injector)) {
 		status("OCAT files missing beside RivaCrossOCAT.exe.");
+		return false;
+	}
+	return true;
+}
+
+// 1: helper reported success, 0: timeout, -1: failure. Rendering is not verified.
+static int runInjector(const wchar_t* dll, const wchar_t* injector, DWORD pid) {
+	wchar_t command[MAX_PATH * 2 + 64];
+	if (swprintf(command, MAX_PATH * 2 + 64, L"\"%ls\" -l \"%ls\" -p %lu",
+		injector, dll, (unsigned long)pid) < 0) return -1;
+	STARTUPINFOW startup = {};
+	startup.cb = sizeof(startup);
+	PROCESS_INFORMATION helper = {};
+	if (!CreateProcessW(injector, command, NULL, NULL, FALSE,
+		CREATE_NO_WINDOW, NULL, NULL, &startup, &helper)) return -1;
+	DWORD wait = WaitForSingleObject(helper.hProcess, 15000);
+	if (wait == WAIT_TIMEOUT) {
+		TerminateProcess(helper.hProcess, 1);
+		WaitForSingleObject(helper.hProcess, 5000);
+	}
+	DWORD exitCode = 0;
+	int result = wait == WAIT_TIMEOUT ? 0 :
+		wait == WAIT_OBJECT_0 && GetExitCodeProcess(helper.hProcess, &exitCode) &&
+		exitCode == 1 ? 1 : -1;
+	CloseHandle(helper.hThread);
+	CloseHandle(helper.hProcess);
+	return result;
+}
+
+struct AttachCandidate {
+	DWORD pid;
+	wchar_t path[MAX_PATH];
+};
+
+static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
+	if (pid <= 4 || pid == GetCurrentProcessId()) return false;
+	DWORD session = 0, ownSession = 0;
+	if (!ProcessIdToSessionId(pid, &session) ||
+		!ProcessIdToSessionId(GetCurrentProcessId(), &ownSession) ||
+		session != ownSession) return false;
+	HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD |
+		PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
+	if (!process) return false; // Protected or inaccessible processes are not candidates.
+	wchar_t path[MAX_PATH];
+	DWORD capacity = MAX_PATH;
+	bool valid = QueryFullProcessImageNameW(process, 0, path, &capacity) != 0;
+	CloseHandle(process);
+	if (!valid || isCs2(path)) return false;
+	wchar_t windows[MAX_PATH];
+	UINT length = GetWindowsDirectoryW(windows, MAX_PATH);
+	if (length && length < MAX_PATH &&
+		_wcsnicmp(path, windows, length) == 0 && path[length] == L'\\') return false;
+	DWORD binaryType = 0;
+	if (!GetBinaryTypeW(path, &binaryType) || binaryType != SCS_64BIT_BINARY)
+		return false;
+	HANDLE snapshot = INVALID_HANDLE_VALUE;
+	for (int attempt = 0; attempt < 3; ++attempt) {
+		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
+		if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH) break;
+	}
+	if (snapshot == INVALID_HANDLE_VALUE) return false;
+	MODULEENTRY32W module = {};
+	module.dwSize = sizeof(module);
+	bool d3d11 = false;
+	if (Module32FirstW(snapshot, &module)) do {
+		if (_wcsicmp(module.szModule, L"d3d11.dll") == 0) {
+			d3d11 = true;
+			break;
+		}
+	} while (Module32NextW(snapshot, &module));
+	CloseHandle(snapshot);
+	if (!d3d11) return false;
+	candidate->pid = pid;
+	wcscpy(candidate->path, path);
+	return true;
+}
+
+enum { IdCandidateList = 600, IdRefreshCandidates };
+struct AttachPicker {
+	HWND list, attach, hint;
+	int count;
+	// ponytail: 256 visible candidates are enough for a manual picker; use a vector if this ceiling is hit.
+	AttachCandidate candidates[256];
+};
+static AttachPicker picker = {};
+
+struct CandidateScan {
+	DWORD seen[512];
+	int count;
+};
+
+static BOOL CALLBACK scanCandidateWindow(HWND window, LPARAM parameter) {
+	if (!IsWindowVisible(window)) return TRUE;
+	CandidateScan* scan = (CandidateScan*)parameter;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(window, &pid);
+	for (int i = 0; i < scan->count; ++i)
+		if (scan->seen[i] == pid) return TRUE;
+	if (scan->count == 512 || picker.count == 256) return FALSE;
+	scan->seen[scan->count++] = pid;
+	AttachCandidate candidate = {};
+	if (!inspectCandidate(pid, &candidate)) return TRUE;
+	picker.candidates[picker.count++] = candidate;
+	wchar_t label[MAX_PATH + 40];
+	const wchar_t* slash = wcsrchr(candidate.path, L'\\');
+	swprintf(label, MAX_PATH + 40, L"%ls   PID %lu",
+		slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid);
+	SendMessageW(picker.list, LB_ADDSTRING, 0, (LPARAM)label);
+	return TRUE;
+}
+
+static void refreshCandidates() {
+	picker.count = 0;
+	SendMessageW(picker.list, LB_RESETCONTENT, 0, 0);
+	CandidateScan scan = {};
+	EnumWindows(scanCandidateWindow, (LPARAM)&scan);
+	if (picker.count) SendMessageW(picker.list, LB_SETCURSEL, 0, 0);
+	EnableWindow(picker.attach, picker.count != 0);
+	SetWindowTextW(picker.hint, picker.count ?
+		L"64-bit D3D11 candidates. CS2 excluded; display is not guaranteed." :
+		L"No D3D11 candidates. Start an app, then click Refresh.");
+}
+
+static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM) {
+	if (message == WM_INITDIALOG) {
+		SetWindowTextW(window, L"Attach to running D3D11 application");
+		RECT rect;
+		GetClientRect(window, &rect);
+		picker.hint = CreateWindowW(L"STATIC",
+			L"64-bit D3D11 candidates. CS2 is excluded. Display is not guaranteed.",
+			WS_CHILD | WS_VISIBLE, 10, 9, rect.right - 20, 22,
+			window, NULL, GetModuleHandleW(NULL), NULL);
+		picker.list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+			WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL | LBS_NOTIFY |
+			LBS_NOINTEGRALHEIGHT, 10, 34, rect.right - 20, rect.bottom - 78,
+			window, (HMENU)IdCandidateList, GetModuleHandleW(NULL), NULL);
+		picker.attach = CreateWindowW(L"BUTTON", L"Attach selected", WS_CHILD |
+			WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON, 10, rect.bottom - 36,
+			115, 27, window, (HMENU)IDOK, GetModuleHandleW(NULL), NULL);
+		HWND refresh = CreateWindowW(L"BUTTON", L"Refresh", WS_CHILD |
+			WS_VISIBLE | WS_TABSTOP, 135, rect.bottom - 36, 90, 27,
+			window, (HMENU)IdRefreshCandidates, GetModuleHandleW(NULL), NULL);
+		HWND cancel = CreateWindowW(L"BUTTON", L"Cancel", WS_CHILD |
+			WS_VISIBLE | WS_TABSTOP, rect.right - 100, rect.bottom - 36,
+			90, 27, window, (HMENU)IDCANCEL, GetModuleHandleW(NULL), NULL);
+		HWND controls[] = { picker.hint, picker.list, picker.attach, refresh, cancel };
+		for (int i = 0; i < 5; ++i)
+			SendMessageW(controls[i], WM_SETFONT, (WPARAM)app.font, TRUE);
+		refreshCandidates();
+		return TRUE;
+	}
+	if (message == WM_COMMAND) {
+		if (LOWORD(key) == IDCANCEL) { EndDialog(window, 0); return TRUE; }
+		if (LOWORD(key) == IdRefreshCandidates) { refreshCandidates(); return TRUE; }
+		if (LOWORD(key) == IDOK ||
+			(LOWORD(key) == IdCandidateList && HIWORD(key) == LBN_DBLCLK)) {
+			int index = (int)SendMessageW(picker.list, LB_GETCURSEL, 0, 0);
+			if (index >= 0 && index < picker.count) EndDialog(window, index + 1);
+			return TRUE;
+		}
+	}
+	return FALSE;
+}
+
+static void attachRunning() {
+	wchar_t dll[MAX_PATH], injector[MAX_PATH];
+	if (!prepareOcat(dll, injector)) return;
+	static const struct {
+		DLGTEMPLATE dialog;
+		WORD menu, windowClass, title;
+	} pickerTemplate = {
+		{ WS_POPUP | WS_CAPTION | WS_SYSMENU | DS_MODALFRAME, 0, 0,
+			0, 0, 350, 230 }, 0, 0, 0
+	};
+	INT_PTR selection = DialogBoxIndirectParamW(GetModuleHandleW(NULL),
+		&pickerTemplate.dialog, app.window, pickerProc, 0);
+	if (selection == -1) {
+		status("Could not open the process selection dialog.");
 		return;
 	}
+	if (selection <= 0 || selection > picker.count) return;
+	AttachCandidate selected = picker.candidates[selection - 1];
+	HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION,
+		FALSE, selected.pid);
+	if (!target) {
+		status("Process exited or denied access. Refresh the list.");
+		return;
+	}
+	AttachCandidate current = {};
+	if (WaitForSingleObject(target, 0) != WAIT_TIMEOUT ||
+		!inspectCandidate(selected.pid, &current) ||
+		_wcsicmp(selected.path, current.path) != 0) {
+		CloseHandle(target);
+		status("Process changed or exited. Refresh the list and try again.");
+		return;
+	}
+	int result = runInjector(dll, injector, selected.pid);
+	CloseHandle(target);
+	status(result == 1 ? "Injector reported success; check the game for TEST." :
+		result == 0 ? "OCAT injector timed out." :
+		"OCAT injection failed or the process denied access.");
+}
+
+static void launchGame() {
+	wchar_t dll[MAX_PATH], injector[MAX_PATH];
+	if (!prepareOcat(dll, injector)) return;
 
 	wchar_t game[MAX_PATH] = L"";
 	OPENFILENAMEW dialog = {};
@@ -265,6 +474,10 @@ static void launchGame() {
 	dialog.nMaxFile = MAX_PATH;
 	dialog.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
 	if (!GetOpenFileNameW(&dialog)) return;
+	if (isCs2(game)) {
+		status("CS2 injection is disabled. Choose another D3D11 application.");
+		return;
+	}
 	DWORD binaryType;
 	if (!GetBinaryTypeW(game, &binaryType) || binaryType != SCS_64BIT_BINARY) {
 		status("Choose a 64-bit game executable.");
@@ -294,37 +507,13 @@ static void launchGame() {
 		return;
 	}
 
-	wchar_t injectorCommand[MAX_PATH * 2 + 64];
-	bool commandReady = swprintf(injectorCommand, MAX_PATH * 2 + 64,
-		L"\"%ls\" -l \"%ls\" -p %lu", injector, dll,
-		(unsigned long)target.dwProcessId) >= 0;
-	bool injected = false;
-	bool timedOut = false;
-	if (commandReady) {
-		STARTUPINFOW helperStartup = {};
-		helperStartup.cb = sizeof(helperStartup);
-		PROCESS_INFORMATION helper = {};
-		if (CreateProcessW(injector, injectorCommand, NULL, NULL, FALSE,
-			CREATE_NO_WINDOW, NULL, NULL, &helperStartup, &helper)) {
-			DWORD wait = WaitForSingleObject(helper.hProcess, 15000);
-			if (wait == WAIT_TIMEOUT) {
-				TerminateProcess(helper.hProcess, 1);
-				WaitForSingleObject(helper.hProcess, 5000);
-			}
-			DWORD exitCode = 0;
-			injected = wait == WAIT_OBJECT_0 &&
-				GetExitCodeProcess(helper.hProcess, &exitCode) && exitCode == 1;
-			timedOut = wait == WAIT_TIMEOUT;
-			CloseHandle(helper.hThread);
-			CloseHandle(helper.hProcess);
-		}
-	}
+	int injection = runInjector(dll, injector, target.dwProcessId);
 	DWORD resumed = ResumeThread(target.hThread);
 	CloseHandle(target.hThread);
 	CloseHandle(target.hProcess);
 	status(resumed == (DWORD)-1 ? "Could not resume the selected game." :
-		injected ? "Game resumed; injector reported success. Check game." :
-		timedOut ? "Game resumed; OCAT injector timed out." :
+		injection == 1 ? "Game resumed; injector reported success. Check game." :
+		injection == 0 ? "Game resumed; OCAT injector timed out." :
 		"Game resumed; OCAT injection failed.");
 }
 #endif
@@ -485,7 +674,9 @@ static void createControls() {
 		20, 315, 150, 28, IdClipboard);
 #ifdef RIVACROSS_OCAT
 	control("BUTTON", "Launch game...", WS_TABSTOP,
-		190, 315, 310, 28, IdLaunch);
+		190, 315, 150, 28, IdLaunch);
+	control("BUTTON", "Attach running...", WS_TABSTOP,
+		350, 315, 150, 28, IdAttach);
 #else
 	app.keep = control("BUTTON", "Leave crosshair visible when closing",
 		WS_TABSTOP | BS_AUTOCHECKBOX, 190, 315, 310, 28, IdKeep);
@@ -531,6 +722,7 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 			case IdApply: applyAndSave(); return 0;
 #ifdef RIVACROSS_OCAT
 			case IdLaunch: launchGame(); return 0;
+			case IdAttach: attachRunning(); return 0;
 #endif
 			case IdVisible:
 				app.hotkeyState.visible = !app.hotkeyState.visible;

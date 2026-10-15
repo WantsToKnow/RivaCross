@@ -2,7 +2,7 @@
 
 This builds the patched OCAT D3D11/D3D12 renderer without installing OCAT's full frontend, capture service, or installer. OCAT's Vulkan overlay is a separate DLL and is not built here. The script patches the OCAT checkout; it does not load the DLL into any process.
 
-The repository also includes optional, prebuilt x64 Release files in [`bin/`](bin/): `gameoverlay64.dll` (280,064 bytes) and `DLLInjector64.exe` (116,736 bytes). They were built from the pinned OCAT commit below with [`ocat-crosshair.patch`](ocat-crosshair.patch) and [`ocat-no-vr.patch`](ocat-no-vr.patch), using Visual Studio 2022. The DLL omits OCAT's VR paths and Vulkan proxy exports. The patched injector accepts Unicode paths. These files are separate from the normal RivaCross executable; the build script does not install or inject them. `RivaCrossOCAT.exe` can launch a selected x64 executable and use the bundled injector to load the DLL.
+The repository also includes optional, prebuilt x64 Release files in [`bin/`](bin/): `gameoverlay64.dll` (287,744 bytes) and `DLLInjector64.exe` (117,248 bytes). They were built from the pinned OCAT commit below with [`ocat-crosshair.patch`](ocat-crosshair.patch), [`ocat-no-vr.patch`](ocat-no-vr.patch), and [`ocat-late-d3d11.patch`](ocat-late-d3d11.patch), using Visual Studio 2022. The DLL omits OCAT's VR paths and Vulkan proxy exports. The patched injector accepts Unicode paths and reports a failed remote load. These files are separate from the normal RivaCross executable; the build script does not install or inject them. `RivaCrossOCAT.exe` can launch a selected x64 executable or attach to a running D3D11 process with the bundled injector.
 
 ## Requirements
 
@@ -22,14 +22,14 @@ git -C $vulkanHeaders sparse-checkout set include
 powershell -NoProfile -ExecutionPolicy Bypass -File .\ocat\build-ocat.ps1 -OcatSource $ocatSource -VulkanSdk $vulkanHeaders
 ```
 
-Run the last command from the RivaCross repository root. The script accepts an existing full Vulkan SDK path for `-VulkanSdk` as well. It applies `ocat-crosshair.patch` and `ocat-no-vr.patch` once each, then builds x64 Release `libMinHook`, `Commons`, `GameOverlay`, and `DLLInjector`. Outputs remain in the OCAT checkout:
+Run the last command from the RivaCross repository root. The script accepts an existing full Vulkan SDK path for `-VulkanSdk` as well. It applies `ocat-crosshair.patch`, `ocat-no-vr.patch`, and `ocat-late-d3d11.patch` once each, then builds x64 Release `libMinHook`, `Commons`, `GameOverlay`, and `DLLInjector`. Outputs remain in the OCAT checkout:
 
-- `x64\Release\Bin\gameoverlay64.dll` — patched D3D renderer without VR paths or Vulkan proxy exports (280,064 bytes in the VS2022 build checked here).
-- `x64\Release\Bin\DLLInjector64.exe` — optional launcher helper (114 KiB in the checked build).
+- `x64\Release\Bin\gameoverlay64.dll` — patched D3D renderer with late D3D11 attachment, without VR paths or Vulkan proxy exports (287,744 bytes in the VS2022 build checked here).
+- `x64\Release\Bin\DLLInjector64.exe` — optional launcher helper (about 115 KiB in the checked build).
 
 The rebuilt DLL needs the Microsoft Visual C++ 2015–2022 runtime at execution time. `dumpbin /imports` confirms it has no `vulkan-1.dll` dependency. Vulkan-Headers are only a build input.
 
-For a local, unprotected x64 D3D test process, load the renderer before the process initializes its graphics API. `DLLInjector64.exe` accepts `-l <absolute DLL path> -p <process ID>`. Its upstream `main()` returns a Boolean, so exit code 1 reports success and 0 reports failure; the success code does not prove that the target DLL initialized correctly. Compatibility with any particular game, including Apex, has not been established by this build.
+For a local, unprotected x64 D3D test process, `DLLInjector64.exe` accepts `-l <absolute DLL path> -p <process ID>`. Exit code 1 reports that remote `LoadLibraryW` returned a nonzero result; 0 reports failure. This still does not prove that the target rendered the overlay. Compatibility with any particular game, including Apex, has not been established by this build.
 
 ## Source notices
 
