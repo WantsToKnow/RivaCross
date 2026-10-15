@@ -402,15 +402,18 @@ static BOOL CALLBACK scanCandidateWindow(HWND window, LPARAM parameter) {
 	else swprintf(label, MAX_PATH + 100, L"%ls   PID %lu%ls",
 		slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid,
 		candidate.state == AttachCandidate::D3D12Only ?
-		L" - D3D12 late attach unsupported" : L" - D3D11");
+		L" - D3D12 (experimental attach)" : L" - D3D11");
 	SendMessageW(picker.list, LB_ADDSTRING, 0, (LPARAM)label);
 	return TRUE;
 }
 
 static void updateAttachButton() {
 	int index = (int)SendMessageW(picker.list, LB_GETCURSEL, 0, 0);
-	EnableWindow(picker.attach, index >= 0 && index < picker.count &&
-		picker.candidates[index].state == AttachCandidate::Ready);
+	bool selected = index >= 0 && index < picker.count;
+	EnableWindow(picker.attach, selected);
+	SetWindowTextW(picker.attach, selected &&
+		picker.candidates[index].state != AttachCandidate::Ready ?
+		L"Try attach" : L"Attach selected");
 }
 
 static void refreshCandidates() {
@@ -426,7 +429,7 @@ static void refreshCandidates() {
 	}
 	updateAttachButton();
 	SetWindowTextW(picker.hint, picker.count ?
-		L"Visible 64-bit apps; only D3D11 entries can attach. CS2 excluded." :
+		L"Visible 64-bit apps; D3D11/12 or unverified. CS2 excluded." :
 		L"No D3D11/D3D12 apps detected. Start an app, then click Refresh.");
 }
 
@@ -436,7 +439,7 @@ static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM
 		RECT rect;
 		GetClientRect(window, &rect);
 		picker.hint = CreateWindowW(L"STATIC",
-			L"Visible 64-bit apps; only D3D11 entries can attach. CS2 excluded.",
+			L"Visible 64-bit apps; D3D11/12 or unverified. CS2 excluded.",
 			WS_CHILD | WS_VISIBLE, 10, 9, rect.right - 20, 22,
 			window, NULL, GetModuleHandleW(NULL), NULL);
 		picker.list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
@@ -467,8 +470,7 @@ static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM
 		if (LOWORD(key) == IDOK ||
 			(LOWORD(key) == IdCandidateList && HIWORD(key) == LBN_DBLCLK)) {
 			int index = (int)SendMessageW(picker.list, LB_GETCURSEL, 0, 0);
-			if (index >= 0 && index < picker.count &&
-				picker.candidates[index].state == AttachCandidate::Ready)
+			if (index >= 0 && index < picker.count)
 				EndDialog(window, index + 1);
 			return TRUE;
 		}
@@ -503,10 +505,16 @@ static void attachRunning() {
 	AttachCandidate current = {};
 	if (WaitForSingleObject(target, 0) != WAIT_TIMEOUT ||
 		!inspectCandidate(selected.pid, &current) ||
-		current.state != AttachCandidate::Ready ||
 		_wcsicmp(selected.path, current.path) != 0) {
 		CloseHandle(target);
 		status("Process changed or exited. Refresh the list and try again.");
+		return;
+	}
+	if (current.state == AttachCandidate::ModuleScanUnavailable &&
+		MessageBoxW(app.window,
+			L"The renderer could not be identified. Injecting into a protected game may put your account at risk. Try anyway?",
+			L"Unverified application", MB_YESNO | MB_ICONWARNING) != IDYES) {
+		CloseHandle(target);
 		return;
 	}
 	int result = runInjector(dll, injector, selected.pid);

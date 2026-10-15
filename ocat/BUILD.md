@@ -2,7 +2,7 @@
 
 This builds the patched OCAT D3D11/D3D12 renderer without installing OCAT's full frontend, capture service, or installer. OCAT's Vulkan overlay is a separate DLL and is not built here. The script patches the OCAT checkout; it does not load the DLL into any process.
 
-The repository also includes optional, prebuilt x64 Release files in [`bin/`](bin/): `gameoverlay64.dll` (288,768 bytes) and `DLLInjector64.exe` (117,248 bytes). They were built from the pinned OCAT commit below with [`ocat-crosshair.patch`](ocat-crosshair.patch), [`ocat-no-vr.patch`](ocat-no-vr.patch), [`ocat-late-d3d11.patch`](ocat-late-d3d11.patch), [`ocat-test-corner.patch`](ocat-test-corner.patch), and [`ocat-pixel-nudge.patch`](ocat-pixel-nudge.patch), using Visual Studio 2022. The DLL omits OCAT's VR paths and Vulkan proxy exports. The patched injector accepts Unicode paths and reports a failed remote load. These files are separate from the normal RivaCross executable; the build script does not install or inject them. `RivaCrossOCAT.exe` can launch a selected x64 executable or attach to a running D3D11 process with the bundled injector.
+The repository also includes optional, prebuilt x64 Release files in [`bin/`](bin/): `gameoverlay64.dll` (301,056 bytes) and `DLLInjector64.exe` (117,248 bytes). They were built from the pinned OCAT commit below with [`ocat-crosshair.patch`](ocat-crosshair.patch), [`ocat-no-vr.patch`](ocat-no-vr.patch), [`ocat-late-d3d11.patch`](ocat-late-d3d11.patch), [`ocat-test-corner.patch`](ocat-test-corner.patch), [`ocat-pixel-nudge.patch`](ocat-pixel-nudge.patch), and [`ocat-late-d3d12.patch`](ocat-late-d3d12.patch), using Visual Studio 2022. The DLL omits OCAT's VR paths and Vulkan proxy exports. The patched injector accepts Unicode paths and reports a failed remote load. These files are separate from the normal RivaCross executable; the build script does not install or inject them. `RivaCrossOCAT.exe` can launch a selected x64 executable or attach to a running D3D11/D3D12 process with the bundled injector.
 
 ## Requirements
 
@@ -22,14 +22,14 @@ git -C $vulkanHeaders sparse-checkout set include
 powershell -NoProfile -ExecutionPolicy Bypass -File .\ocat\build-ocat.ps1 -OcatSource $ocatSource -VulkanSdk $vulkanHeaders
 ```
 
-Run the last command from the RivaCross repository root. The script accepts an existing full Vulkan SDK path for `-VulkanSdk` as well. It applies the five patches listed above once each, then builds x64 Release `libMinHook`, `Commons`, `GameOverlay`, and `DLLInjector`. Outputs remain in the OCAT checkout:
+Run the last command from the RivaCross repository root. The script accepts an existing full Vulkan SDK path for `-VulkanSdk` as well. It applies the six patches listed above once each, then builds x64 Release `libMinHook`, `Commons`, `GameOverlay`, and `DLLInjector`. Outputs remain in the OCAT checkout:
 
-- `x64\Release\Bin\gameoverlay64.dll` — patched D3D renderer with late D3D11 attachment, without VR paths or Vulkan proxy exports (288,768 bytes in the VS2022 build checked here).
+- `x64\Release\Bin\gameoverlay64.dll` — patched D3D renderer with late D3D11/D3D12 attachment, without VR paths or Vulkan proxy exports (301,056 bytes in the VS2022 build checked here).
 - `x64\Release\Bin\DLLInjector64.exe` — optional launcher helper (about 115 KiB in the checked build).
 
 The rebuilt DLL needs the Microsoft Visual C++ 2015–2022 runtime at execution time. `dumpbin /imports` confirms it has no `vulkan-1.dll` dependency. Vulkan-Headers are only a build input.
 
-For a local, unprotected x64 D3D test process, `DLLInjector64.exe` accepts `-l <absolute DLL path> -p <process ID>`. Exit code 1 reports that remote `LoadLibraryW` returned a nonzero result; 0 reports failure. This still does not prove that the target rendered the overlay. Compatibility with any particular game, including Apex, has not been established by this build.
+For a local, unprotected x64 D3D test process, `DLLInjector64.exe` accepts `-l <absolute DLL path> -p <process ID>`. Exit code 1 reports that remote `LoadLibraryW` returned a nonzero result; 0 reports failure. The experimental late D3D12 path observes `ExecuteCommandLists` to find a direct command queue for the swapchain's device and only draws to swapchains marked for render-target output. A swapchain does not expose its original queue, so rendering stops if two distinct direct queues appear for one device. If ResizeBuffers1 supplies new Present queues, rendering stops for that swapchain until it is released, including after later resizes. The late renderer waits for GPU completion before releasing resources; if completion cannot be confirmed, it retains them and fails a resize with `DXGI_ERROR_INVALID_CALL`. A local D3D12 smoke test displayed both the TEST marker and crosshair after injection. This does not establish compatibility with any particular game, including Apex.
 
 ## Source notices
 

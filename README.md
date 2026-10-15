@@ -60,17 +60,21 @@ starts it suspended, asks OCAT's injector to load the modified overlay, then
 resumes it even if injection fails. Games that require their own launcher may
 reject direct EXE launch.
 
-For an already-running, unprotected D3D11 program, click **Attach running...**.
-The picker lists visible 64-bit processes that have loaded `d3d11.dll` and can
-be opened with the required process rights. It also shows detected D3D12-only
-processes and processes whose module scan failed. These entries are labeled
-but cannot be attached. Select a D3D11 entry and look for `TEST` in its window.
-This list does not certify that the DLL can load or render. The injector's
-success report confirms only that remote `LoadLibraryW` returned a
-nonzero result; it does not prove that the crosshair rendered. Late attachment
-is currently implemented for D3D11 only. Keep RivaCrossOCAT open (it may be
-minimized) while playing. Closing the GUI hides the crosshair and releases the
-shared-memory block. Position uses a 960 x 540 reference grid. The bundled
+For an already-running, unprotected D3D11 or D3D12 program, click
+**Attach running...**. The picker lists visible 64-bit processes with the
+required process rights that have loaded `d3d11.dll` or `d3d12.dll`. It also
+shows accessible processes whose module scan failed, marked as unverified.
+Select one and look for `TEST` in its window. D3D12 late attachment is
+experimental; unverified entries require a warning confirmation. This list
+does not certify that the DLL can load or render. The injector's success report
+confirms only that remote `LoadLibraryW` returned a nonzero result; it does not
+prove that the crosshair rendered. The late D3D12 renderer stops drawing when it
+observes multiple direct queues for one device or a `ResizeBuffers1` call that
+supplies Present queues, because it cannot then identify the right queue.
+Anti-cheat-protected games may block attachment or penalize injected third-party
+software; this project does not certify account safety. Keep RivaCrossOCAT open
+(it may be minimized) while playing. Closing the GUI hides the crosshair and
+releases the shared-memory block. Position uses a 960 x 540 reference grid. The bundled
 DLL's launch-time renderer targets Direct3D 11 and 12; Vulkan is not included.
 
 In the OCAT GUI, the four arrow buttons beside X/Y move the crosshair by one

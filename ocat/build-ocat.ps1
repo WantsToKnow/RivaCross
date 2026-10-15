@@ -19,7 +19,7 @@ if (-not (Test-Path -LiteralPath (Join-Path $sdk 'Include\vulkan\vulkan.h'))) {
 }
 
 $patchNames = @('ocat-crosshair.patch', 'ocat-no-vr.patch', 'ocat-late-d3d11.patch',
-  'ocat-test-corner.patch', 'ocat-pixel-nudge.patch')
+  'ocat-test-corner.patch', 'ocat-pixel-nudge.patch', 'ocat-late-d3d12.patch')
 # Later patches can change earlier patch context, so find the newest applied patch.
 $ErrorActionPreference = 'Continue'
 $appliedCount = 0
