@@ -1,18 +1,26 @@
 #include "RivaCross.h"
+#ifdef RIVACROSS_OCAT
+#include "OCATShared.h"
+#endif
 
 #include <commdlg.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef RIVACROSS_OCAT
+#include <wchar.h>
+#endif
 
 enum ControlId {
 	IdCrosshair = 101, IdX, IdY, IdScale, IdColor, IdMode,
 	IdHotkey, IdMaster, IdLoad, IdSaveAs, IdApply, IdVisible,
-	IdClipboard, IdKeep, IdStatus
+	IdClipboard, IdKeep, IdStatus, IdLaunch
 };
 
+#ifndef RIVACROSS_OCAT
 static const char* const OsdEntry = "RivaCross_crosshair";
+#endif
 
 struct AppState {
 	HWND window, crosshair, x, y, scale, color, mode;
@@ -138,11 +146,24 @@ static bool readControls() {
 	return true;
 }
 
+static int sendOverlay() {
+#ifdef RIVACROSS_OCAT
+	return OCATSharedUpdate(&app.config, app.hotkeyState.visible) ? 0 : -1;
+#else
+	return RTSSUpdateOSDVisibility(&app.config, OsdEntry, app.hotkeyState.visible);
+#endif
+}
+
 static void updateOverlay() {
-	int result = RTSSUpdateOSDVisibility(&app.config, OsdEntry, app.hotkeyState.visible);
+	int result = sendOverlay();
+#ifdef RIVACROSS_OCAT
+	status(result == 0 ? "Settings ready. Check the crosshair in your game." :
+		"Could not create OCAT bridge. Close another RivaCrossOCAT or restart.");
+#else
 	status(result == 0 ? "Sent to RTSS; game display is not verified." :
 		result == -4 ? "RTSS is busy. Click Apply + Save again." :
 		"RTSS is unavailable. Start RTSS, then click Apply + Save.");
+#endif
 }
 
 static void applyAndSave() {
@@ -203,6 +224,110 @@ static void saveAs() {
 	updateOverlay();
 	refreshControls();
 }
+
+#ifdef RIVACROSS_OCAT
+static bool besideExe(wchar_t path[MAX_PATH], const wchar_t* suffix) {
+	DWORD length = GetModuleFileNameW(NULL, path, MAX_PATH);
+	if (!length || length >= MAX_PATH) return false;
+	wchar_t* slash = wcsrchr(path, L'\\');
+	if (!slash) return false;
+	size_t prefix = slash + 1 - path;
+	if (prefix + wcslen(suffix) >= MAX_PATH) return false;
+	wcscpy(path + prefix, suffix);
+	return true;
+}
+
+static bool regularFile(const wchar_t* path) {
+	DWORD attributes = GetFileAttributesW(path);
+	return attributes != INVALID_FILE_ATTRIBUTES &&
+		!(attributes & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static void launchGame() {
+	if (!OCATSharedOpen() || !OCATSharedUpdate(&app.config, app.hotkeyState.visible)) {
+		status("OCAT bridge unavailable. Close another RivaCrossOCAT.");
+		return;
+	}
+	wchar_t dll[MAX_PATH], injector[MAX_PATH];
+	if (!besideExe(dll, L"ocat\\bin\\gameoverlay64.dll") ||
+		!besideExe(injector, L"ocat\\bin\\DLLInjector64.exe") ||
+		!regularFile(dll) || !regularFile(injector)) {
+		status("OCAT files missing beside RivaCrossOCAT.exe.");
+		return;
+	}
+
+	wchar_t game[MAX_PATH] = L"";
+	OPENFILENAMEW dialog = {};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = app.window;
+	dialog.lpstrFilter = L"Games (*.exe)\0*.exe\0All files (*.*)\0*.*\0";
+	dialog.lpstrFile = game;
+	dialog.nMaxFile = MAX_PATH;
+	dialog.Flags = OFN_PATHMUSTEXIST | OFN_FILEMUSTEXIST;
+	if (!GetOpenFileNameW(&dialog)) return;
+	DWORD binaryType;
+	if (!GetBinaryTypeW(game, &binaryType) || binaryType != SCS_64BIT_BINARY) {
+		status("Choose a 64-bit game executable.");
+		return;
+	}
+
+	wchar_t gameDir[MAX_PATH];
+	wcscpy(gameDir, game);
+	wchar_t* slash = wcsrchr(gameDir, L'\\');
+	if (!slash) {
+		status("Could not determine the game directory.");
+		return;
+	}
+	*slash = L'\0';
+	wchar_t gameCommand[MAX_PATH + 3];
+	if (swprintf(gameCommand, MAX_PATH + 3, L"\"%ls\"", game) < 0) {
+		status("Game path is too long.");
+		return;
+	}
+
+	STARTUPINFOW startup = {};
+	startup.cb = sizeof(startup);
+	PROCESS_INFORMATION target = {};
+	if (!CreateProcessW(game, gameCommand, NULL, NULL, FALSE, CREATE_SUSPENDED,
+		NULL, gameDir, &startup, &target)) {
+		status("Could not start the selected game.");
+		return;
+	}
+
+	wchar_t injectorCommand[MAX_PATH * 2 + 64];
+	bool commandReady = swprintf(injectorCommand, MAX_PATH * 2 + 64,
+		L"\"%ls\" -l \"%ls\" -p %lu", injector, dll,
+		(unsigned long)target.dwProcessId) >= 0;
+	bool injected = false;
+	bool timedOut = false;
+	if (commandReady) {
+		STARTUPINFOW helperStartup = {};
+		helperStartup.cb = sizeof(helperStartup);
+		PROCESS_INFORMATION helper = {};
+		if (CreateProcessW(injector, injectorCommand, NULL, NULL, FALSE,
+			CREATE_NO_WINDOW, NULL, NULL, &helperStartup, &helper)) {
+			DWORD wait = WaitForSingleObject(helper.hProcess, 15000);
+			if (wait == WAIT_TIMEOUT) {
+				TerminateProcess(helper.hProcess, 1);
+				WaitForSingleObject(helper.hProcess, 5000);
+			}
+			DWORD exitCode = 0;
+			injected = wait == WAIT_OBJECT_0 &&
+				GetExitCodeProcess(helper.hProcess, &exitCode) && exitCode == 1;
+			timedOut = wait == WAIT_TIMEOUT;
+			CloseHandle(helper.hThread);
+			CloseHandle(helper.hProcess);
+		}
+	}
+	DWORD resumed = ResumeThread(target.hThread);
+	CloseHandle(target.hThread);
+	CloseHandle(target.hProcess);
+	status(resumed == (DWORD)-1 ? "Could not resume the selected game." :
+		injected ? "Game resumed; injector reported success. Check game." :
+		timedOut ? "Game resumed; OCAT injector timed out." :
+		"Game resumed; OCAT injection failed.");
+}
+#endif
 
 static void endCapture(const char* message) {
 	HWND button = app.captureTarget;
@@ -302,7 +427,11 @@ static void pollHotkeys() {
 		else if (pressed && !hotkey->prevAsyncState) visible = !visible;
 		if (visible != hotkey->visible) {
 			hotkey->visible = visible;
-			RTSSUpdateOSDVisibility(&app.config, OsdEntry, visible);
+			if (sendOverlay() != 0) {
+#ifdef RIVACROSS_OCAT
+				status("OCAT bridge unavailable. Restart RivaCrossOCAT.");
+#endif
+			}
 			SetWindowTextA(app.visibleButton, visible ? "Hide" : "Show");
 		}
 	}
@@ -354,8 +483,13 @@ static void createControls() {
 		375, 270, 125, 30, IdVisible);
 	control("BUTTON", "Clear clipboard...", WS_TABSTOP,
 		20, 315, 150, 28, IdClipboard);
+#ifdef RIVACROSS_OCAT
+	control("BUTTON", "Launch game...", WS_TABSTOP,
+		190, 315, 310, 28, IdLaunch);
+#else
 	app.keep = control("BUTTON", "Leave crosshair visible when closing",
 		WS_TABSTOP | BS_AUTOCHECKBOX, 190, 315, 310, 28, IdKeep);
+#endif
 	app.status = control("STATIC", "", 0, 20, 365, 490, 22, IdStatus);
 }
 
@@ -373,6 +507,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 	case WM_CREATE:
 		app.window = hwnd;
 		createControls();
+#ifdef RIVACROSS_OCAT
+		OCATSharedOpen();
+#endif
 		initConfig(&app.config);
 		app.hotkeyState.visible = true;
 		app.hotkeyState.masterEnabled = true;
@@ -392,6 +529,9 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 			case IdLoad: loadPreset(); return 0;
 			case IdSaveAs: saveAs(); return 0;
 			case IdApply: applyAndSave(); return 0;
+#ifdef RIVACROSS_OCAT
+			case IdLaunch: launchGame(); return 0;
+#endif
 			case IdVisible:
 				app.hotkeyState.visible = !app.hotkeyState.visible;
 				updateOverlay();
@@ -422,9 +562,14 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 		return 0;
 	case WM_DESTROY:
 		KillTimer(hwnd, 1);
+#ifdef RIVACROSS_OCAT
+		OCATSharedUpdate(&app.config, false);
+		OCATSharedClose();
+#else
 		if (SendMessageA(app.keep, BM_GETCHECK, 0, 0) == BST_CHECKED)
 			RTSSUpdateOSDVisibility(&app.config, OsdEntry, true);
 		else RTSSReleaseOSDEntry(OsdEntry);
+#endif
 		PostQuitMessage(0);
 		return 0;
 	case WM_NCDESTROY:
@@ -444,7 +589,12 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
 	if (!RegisterClassA(&wc)) return 1;
 	RECT size = { 0, 0, 520, 405 };
 	AdjustWindowRect(&size, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
-	HWND window = CreateWindowExA(0, wc.lpszClassName, "RivaCross",
+	HWND window = CreateWindowExA(0, wc.lpszClassName,
+#ifdef RIVACROSS_OCAT
+		"RivaCross (OCAT)",
+#else
+		"RivaCross",
+#endif
 		WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
 		CW_USEDEFAULT, CW_USEDEFAULT, size.right - size.left, size.bottom - size.top,
 		NULL, NULL, instance, NULL);

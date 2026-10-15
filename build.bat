@@ -14,6 +14,8 @@ if errorlevel 1 (
 
 if /I "%~1"=="console" (
     nmake console
+) else if /I "%~1"=="ocat" (
+    nmake ocat
 ) else (
     nmake
 )

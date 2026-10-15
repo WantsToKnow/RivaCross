@@ -1,0 +1,334 @@
+diff --git a/Commons/Rendering/OCATCrosshairShared.h b/Commons/Rendering/OCATCrosshairShared.h
+new file mode 100644
+index 0000000..8bc991d
+--- /dev/null
++++ b/Commons/Rendering/OCATCrosshairShared.h
+@@ -0,0 +1,21 @@
++#pragma once
++
++#include <windows.h>
++
++// Shared by the RivaCross GUI and the optional OCAT rendering DLL.
++// Positions use the same 960 x 540 reference grid as the RTSS preset UI.
++#define RIVACROSS_OCAT_MAPPING_NAME L"Local\\RivaCrossOCATCrosshairV1"
++#define RIVACROSS_OCAT_MAGIC 0x54414352u // "RCAT"
++#define RIVACROSS_OCAT_VERSION 1u
++
++struct OCATCrosshairShared {
++	volatile LONG sequence;
++	DWORD magic;
++	DWORD version;
++	LONG visible;
++	LONG x;
++	LONG y;
++	LONG size;
++	BYTE rgba[4];
++	char text[64];
++};
+diff --git a/Commons/Rendering/OverlayBitmap.cpp b/Commons/Rendering/OverlayBitmap.cpp
+index adc8073..4ff40ca 100644
+--- a/Commons/Rendering/OverlayBitmap.cpp
++++ b/Commons/Rendering/OverlayBitmap.cpp
+@@ -27,6 +27,7 @@
+ #include "../Recording/RecordingState.h"
+ 
+ #include <sstream>
++#include <cstring>
+ 
+ using namespace Microsoft::WRL;
+ 
+@@ -70,6 +71,21 @@ OverlayBitmap::OverlayBitmap()
+ 
+ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
+ {
++  rivaCrossMapping_ = OpenFileMappingW(FILE_MAP_READ, FALSE, RIVACROSS_OCAT_MAPPING_NAME);
++  if (rivaCrossMapping_) {
++    rivaCrossView_ = static_cast<const OCATCrosshairShared*>(
++        MapViewOfFile(rivaCrossMapping_, FILE_MAP_READ, 0, 0, sizeof(OCATCrosshairShared)));
++    if (rivaCrossView_) {
++      rivaCrossMode_ = true;
++      rivaCrossState_.x = 480;
++      rivaCrossState_.y = 270;
++      ReadRivaCrossState();
++    } else {
++      CloseHandle(rivaCrossMapping_);
++      rivaCrossMapping_ = nullptr;
++    }
++  }
++
+   if (!InitFactories()) {
+     return false;
+   }
+@@ -80,7 +96,7 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
+     return false;
+   }
+ 
+-  if (!InitText()) {
++  if (!rivaCrossMode_ && !InitText()) {
+     return false;
+   }
+ 
+@@ -105,6 +121,9 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
+ 
+ OverlayBitmap::~OverlayBitmap()
+ {
++  if (rivaCrossView_) UnmapViewOfFile(rivaCrossView_);
++  if (rivaCrossMapping_) CloseHandle(rivaCrossMapping_);
++
+   for (int i = 0; i < alignmentCount_; ++i) {
+     fpsMessage_[i].reset();
+     msMessage_[i].reset();
+@@ -125,6 +144,7 @@ OverlayBitmap::~OverlayBitmap()
+   stopMessageFormat_.Reset();
+   recordingMessageFormat_.Reset();
+   graphLabelMessagFormat_.Reset();
++  rivaCrossFormat_.Reset();
+   iwicFactory_.Reset();
+   bitmap_.Reset();
+   bitmapLock_.Reset();
+@@ -139,6 +159,16 @@ OverlayBitmap::~OverlayBitmap()
+ 
+ void OverlayBitmap::CalcSize(int screenWidth, int screenHeight)
+ {
++  if (rivaCrossMode_) {
++    fullWidth_ = rivaCrossTileSize_ / 2;
++    fullHeight_ = rivaCrossTileSize_;
++    barWidth_ = 0;
++    Resize(screenWidth, screenHeight);
++    fullArea_.d2d1 = D2D1::RectF(0.0f, 0.0f, rivaCrossTileSize_, rivaCrossTileSize_);
++    fullArea_.wic = {0, 0, rivaCrossTileSize_, rivaCrossTileSize_};
++    return;
++  }
++
+   fullWidth_ = 256;
+   fullHeight_ = lineHeight_ * 8;
+   messageHeight_ = lineHeight_ * 3;
+@@ -298,6 +328,14 @@ void OverlayBitmap::Resize(int screenWidth, int screenHeight)
+ 
+ void OverlayBitmap::UpdateScreenPosition()
+ {
++  if (rivaCrossMode_) {
++    screenPosition_.x = static_cast<int>(
++        static_cast<long long>(rivaCrossState_.x) * screenWidth_ / 960 - rivaCrossTileSize_ / 2);
++    screenPosition_.y = static_cast<int>(
++        static_cast<long long>(rivaCrossState_.y) * screenHeight_ / 540 - rivaCrossTileSize_ / 2);
++    return;
++  }
++
+   const auto overlayPosition = RecordingState::GetInstance().GetOverlayPosition();
+   if (IsLowerOverlayPosition(overlayPosition)) {
+     if (IsLeftOverlayPosition(overlayPosition)) {
+@@ -340,6 +378,13 @@ void OverlayBitmap::StartRendering()
+ 
+ void OverlayBitmap::Update()
+ {
++  if (rivaCrossMode_) {
++    ReadRivaCrossState();
++    UpdateScreenPosition();
++    DrawRivaCross();
++    return;
++  }
++
+   const auto textureState = RecordingState::GetInstance().Update();
+   if (RecordingState::GetInstance().Started()) {
+     performanceCounter_.Start();
+@@ -367,6 +412,62 @@ void OverlayBitmap::Update()
+   currentFrame_ = (currentFrame_ + 1) % 512;
+ }
+ 
++bool OverlayBitmap::ReadRivaCrossState()
++{
++  if (!rivaCrossView_) return false;
++  for (int attempt = 0; attempt < 4; ++attempt) {
++    const LONG before = rivaCrossView_->sequence;
++    if (before & 1) continue;
++    MemoryBarrier();
++    OCATCrosshairShared next;
++    std::memcpy(&next, rivaCrossView_, sizeof(next));
++    MemoryBarrier();
++    const LONG after = rivaCrossView_->sequence;
++    if (before == after && !(after & 1) &&
++        next.magic == RIVACROSS_OCAT_MAGIC && next.version == RIVACROSS_OCAT_VERSION) {
++      next.text[sizeof(next.text) - 1] = '\0';
++      rivaCrossState_ = next;
++      return true;
++    }
++  }
++  return false;
++}
++
++void OverlayBitmap::DrawRivaCross()
++{
++  renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
++  if (!rivaCrossState_.visible || !rivaCrossState_.text[0]) return;
++
++  int size = static_cast<int>(rivaCrossState_.size);
++  if (size < 1) size = 1;
++  if (size > rivaCrossTileSize_ - 8) size = rivaCrossTileSize_ - 8;
++  if (!rivaCrossFormat_ || size != rivaCrossFontSize_) {
++    rivaCrossFormat_.Attach(CreateTextFormat(static_cast<float>(size),
++        DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER));
++    if (!rivaCrossFormat_) return;
++    rivaCrossFontSize_ = size;
++  }
++
++  int codepage = CP_UTF8;
++  DWORD flags = MB_ERR_INVALID_CHARS;
++  int length = MultiByteToWideChar(codepage, flags, rivaCrossState_.text, -1, nullptr, 0);
++  if (length <= 0) {
++    codepage = CP_ACP;
++    flags = 0;
++    length = MultiByteToWideChar(codepage, flags, rivaCrossState_.text, -1, nullptr, 0);
++  }
++  if (length <= 1) return;
++  std::wstring glyph(static_cast<size_t>(length), L'\0');
++  if (!MultiByteToWideChar(codepage, flags, rivaCrossState_.text, -1, &glyph[0], length)) return;
++  glyph.resize(static_cast<size_t>(length - 1));
++
++  const BYTE* rgba = rivaCrossState_.rgba;
++  textBrush_->SetColor(D2D1::ColorF(rgba[0] / 255.0f, rgba[1] / 255.0f,
++                                   rgba[2] / 255.0f, rgba[3] / 255.0f));
++  renderTarget_->DrawText(glyph.c_str(), static_cast<UINT32>(glyph.size()),
++                          rivaCrossFormat_.Get(), fullArea_.d2d1, textBrush_.Get());
++}
++
+ void OverlayBitmap::DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameInfo& frameInfo)
+ {
+   const int alignment = static_cast<int>(currentAlignment_);
+@@ -413,7 +514,8 @@ void OverlayBitmap::DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameIn
+ }
+ 
+ bool OverlayBitmap::HideOverlay()
+-{ 
++{
++  if (rivaCrossMode_) return false;
+   return (RecordingState::GetInstance().IsRecording() &&
+           RecordingState::GetInstance().IsOverlayDuringCaptureHidden());
+ }
+@@ -523,11 +625,13 @@ void OverlayBitmap::DrawBar()
+ 
+ int OverlayBitmap::GetLagIndicatorHotkey()
+ {
++  if (rivaCrossMode_) return -1;
+   return RecordingState::GetInstance().GetLagIndicatorHotkey();
+ }
+ 
+ bool OverlayBitmap::GetLagIndicatorVisibility()
+ {
++  if (rivaCrossMode_) return false;
+   return RecordingState::GetInstance().IsLagIndicatorShowing();
+ }
+ 
+@@ -566,7 +670,10 @@ void OverlayBitmap::UnlockBitmapData() { bitmapLock_.Reset(); }
+ 
+ int OverlayBitmap::GetFullWidth() const { return fullWidth_ * 2; }
+ 
+-int OverlayBitmap::GetFullHeight() const { return screenHeight_; }
++int OverlayBitmap::GetFullHeight() const
++{
++  return rivaCrossMode_ ? rivaCrossTileSize_ : screenHeight_;
++}
+ 
+ OverlayBitmap::Position OverlayBitmap::GetScreenPos() const { return screenPosition_; }
+ 
+@@ -609,7 +716,8 @@ bool OverlayBitmap::InitFactories()
+ bool OverlayBitmap::InitBitmap()
+ {
+   HRESULT hr = iwicFactory_->CreateBitmap(
+-      fullWidth_ * 2, screenHeight_, GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad, &bitmap_);
++      GetFullWidth(), GetFullHeight(), GUID_WICPixelFormat32bppPBGRA, WICBitmapCacheOnLoad,
++      &bitmap_);
+   if (FAILED(hr)) {
+     g_messageLog.LogError("OverlayBitmap", "CreateBitmap failed, HRESULT", hr);
+     return false;
+diff --git a/Commons/Rendering/OverlayBitmap.h b/Commons/Rendering/OverlayBitmap.h
+index 007dec7..3bac9bb 100644
+--- a/Commons/Rendering/OverlayBitmap.h
++++ b/Commons/Rendering/OverlayBitmap.h
+@@ -31,6 +31,7 @@
+ 
+ #include "../Recording/PerformanceCounter.hpp"
+ #include "../Recording/RecordingState.h"
++#include "OCATCrosshairShared.h"
+ #include "TextMessage.h"
+ 
+ // Render overlay text with background into a bitmap.
+@@ -107,6 +108,8 @@ private:
+   void InitTextForAlignment(Alignment alignment);
+ 
+   void Update();
++  bool ReadRivaCrossState();
++  void DrawRivaCross();
+   void StartRendering();
+   void DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameInfo& frameInfo);
+   void DrawMessages(TextureState textureState);
+@@ -142,12 +145,14 @@ private:
+   Microsoft::WRL::ComPtr<IDWriteTextFormat> stopMessageFormat_;
+   Microsoft::WRL::ComPtr<IDWriteTextFormat> recordingMessageFormat_;
+   Microsoft::WRL::ComPtr<IDWriteTextFormat> graphLabelMessagFormat_;
++  Microsoft::WRL::ComPtr<IDWriteTextFormat> rivaCrossFormat_;
+ 
+   Microsoft::WRL::ComPtr<IWICImagingFactory> iwicFactory_;
+   Microsoft::WRL::ComPtr<IWICBitmap> bitmap_;
+   Microsoft::WRL::ComPtr<IWICBitmapLock> bitmapLock_;
+ 
+   static const int alignmentCount_ = 4;
++  static const int rivaCrossTileSize_ = 256;
+   std::unique_ptr<TextMessage> fpsMessage_[alignmentCount_];
+   std::unique_ptr<TextMessage> msMessage_[alignmentCount_];
+   std::unique_ptr<TextMessage> stateMessage_[alignmentCount_];
+@@ -191,6 +196,12 @@ private:
+   bool coInitialized_ = false;
+   Alignment currentAlignment_ = Alignment::UpperLeft;
+ 
++  HANDLE rivaCrossMapping_ = nullptr;
++  const OCATCrosshairShared* rivaCrossView_ = nullptr;
++  OCATCrosshairShared rivaCrossState_ = {};
++  bool rivaCrossMode_ = false;
++  int rivaCrossFontSize_ = 0;
++
+   bool recording_ = false;
+   std::wstring api_;
+ };
+diff --git a/Commons/Utility/FileDirectory.cpp b/Commons/Utility/FileDirectory.cpp
+index 8ecbf8e..41402a2 100644
+--- a/Commons/Utility/FileDirectory.cpp
++++ b/Commons/Utility/FileDirectory.cpp
+@@ -23,8 +23,10 @@
+ 
+ #include "FileDirectory.h"
+ #include <shlobj.h>
++#include <cwchar>
+ 
+ #include "../Utility/ProcessHelper.h"
++#include "../Rendering/OCATCrosshairShared.h"
+ #include "../Utility/Constants.h"
+ #include "../Logging/MessageLog.h"
+ #include "../Utility/StringUtils.h"
+@@ -163,6 +165,26 @@ bool FileDirectory::FindBinaryDir()
+         result = RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\OCAT\\", 0, KEY_READ | KEY_WOW64_64KEY, &registryKey);
+         if (result != ERROR_SUCCESS)
+         {
++          // RivaCross can use the renderer DLL without installing the OCAT frontend.
++          HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, RIVACROSS_OCAT_MAPPING_NAME);
++          if (mapping) {
++            CloseHandle(mapping);
++            HMODULE module = nullptr;
++            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++                  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                  reinterpret_cast<LPCWSTR>(&g_fileDirectory), &module)) {
++              WCHAR modulePath[MAX_PATH];
++              const DWORD length = GetModuleFileNameW(module, modulePath, MAX_PATH);
++              if (length && length < MAX_PATH) {
++                WCHAR* slash = std::wcsrchr(modulePath, L'\\');
++                if (slash) {
++                  slash[1] = L'\0';
++                  directories_[DirectoryType::Bin] = Directory(modulePath);
++                  return true;
++                }
++              }
++            }
++          }
+           g_messageLog.LogError("FileDirectory", L"Failed to open OCAT registry key", result);
+           return false;
+         }

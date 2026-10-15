@@ -4,7 +4,7 @@ RivaCross - Customizable Crosshair Overlay
 Adds a customizable crosshair to MSI Afterburner /
 RivaTuner Statistics Server
 
-RivaCross makes use of a feature in RivaTuner Statistics Server (RTSS)
+The default build uses a feature in RivaTuner Statistics Server (RTSS)
 that enables the addition of custom text to the RTSS on screen display (OSD).<br>
 The Windows GUI lets you customize the crosshair without opening a console.
 
@@ -46,6 +46,23 @@ the RTSS overlay unless "Leave crosshair visible when closing" is checked.
 
 The previous text interface is available as the optional `RivaCrossConsole.exe` build.
 
+Optional OCAT build
+-------------------
+
+`RivaCrossOCAT.exe` publishes the same presets and hotkey visibility to a named
+shared-memory block for a compatible, modified OCAT game overlay. It does not
+use RTSS. Stock OCAT does not read this block or draw the custom crosshair.
+With `ocat/bin/gameoverlay64.dll` and `ocat/bin/DLLInjector64.exe` beside the
+GUI, click **Launch game...** and select a 64-bit game executable. The GUI
+starts it suspended, asks OCAT's injector to load the modified overlay, then
+resumes it even if injection fails. A success report from the injector does not
+prove the DLL loaded or the crosshair rendered. Games that require their own
+launcher may reject direct EXE launch. Keep RivaCrossOCAT open (it may be
+minimized) while playing. Closing the GUI hides the crosshair and releases the
+shared-memory block. Position uses a 960 x 540 reference grid. The GUI cannot
+verify whether a game actually displays the crosshair. The bundled DLL targets
+Direct3D 11 and 12; Vulkan is not included.
+
 For bug reports or feature suggestions please use the 
 [Issues section](https://github.com/irseny/RivaCross/issues).
 
@@ -56,6 +73,10 @@ From an MSVC developer command prompt, run `nmake` in the repository root.
 Alternatively, run `build.bat` from any directory. This builds the Windows GUI
 as `RivaCross.exe` using only Windows system libraries; PDCurses is not needed.
 
+Run `nmake ocat` or `build.bat ocat` for the optional `RivaCrossOCAT.exe`.
+It also uses only Windows system libraries, but needs the compatible OCAT
+renderer described above to display anything in a game.
+
 To build the optional text interface, run `nmake console` or `build.bat console`.
 It produces `RivaCrossConsole.exe` and requires `lib/pdcurses.lib`. If the
 library is missing, run `git submodule update --init`, then build PDCurses in
@@ -63,7 +84,8 @@ library is missing, run `git submodule update --init`, then build PDCurses in
 `pdcurses.lib` to `lib`.
 
 With MinGW, run `mingw32-make -f Makefile.mingw` for the GUI. The optional
-`console` target additionally needs a MinGW-built `lib/pdcurses.a`.
+`ocat` target builds `RivaCrossOCAT.exe`; the `console` target additionally
+needs a MinGW-built `lib/pdcurses.a`.
 
 Limitations
 -----------

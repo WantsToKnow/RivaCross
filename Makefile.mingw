@@ -2,11 +2,17 @@ CXX = g++
 CXXFLAGS = -Iinclude -Wno-multichar
 WIN_LIBS = -luser32 -lgdi32 -lcomdlg32
 GUI_OBJS = obj/Main.o obj/Core.o obj/RTSShared.o
+OCAT_OBJS = obj/OCATMain.o obj/Core.o obj/OCATShared.o
 CONSOLE_OBJS = obj/ConsoleMain.o obj/RivaCross.o obj/Core.o obj/RTSShared.o
 
 all: RivaCross.exe
 
 RivaCross.exe: $(GUI_OBJS)
+	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS)
+
+ocat: RivaCrossOCAT.exe
+
+RivaCrossOCAT.exe: $(OCAT_OBJS)
 	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS)
 
 console: RivaCrossConsole.exe
@@ -17,5 +23,8 @@ RivaCrossConsole.exe: $(CONSOLE_OBJS)
 obj/%.o: src/%.cpp
 	$(CXX) -c $(CXXFLAGS) -o $@ $<
 
+obj/OCATMain.o: src/Main.cpp src/OCATShared.h src/OCATCrosshairShared.h
+	$(CXX) -c $(CXXFLAGS) -DRIVACROSS_OCAT -o $@ src/Main.cpp
+
 clean:
-	-rm -f RivaCross.exe RivaCrossConsole.exe obj/*.o
+	-rm -f RivaCross.exe RivaCrossOCAT.exe RivaCrossConsole.exe obj/*.o

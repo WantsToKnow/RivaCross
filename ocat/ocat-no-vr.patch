@@ -1,0 +1,255 @@
+diff --git a/GameOverlay/d3d/deps/Vulkan.props b/GameOverlay/d3d/deps/Vulkan.props
+index e509ba4..55f5a0f 100644
+--- a/GameOverlay/d3d/deps/Vulkan.props
++++ b/GameOverlay/d3d/deps/Vulkan.props
+@@ -12,8 +12,5 @@
+     <ClCompile>
+       <PreprocessorDefinitions>VK_USE_PLATFORM_WIN32_KHR;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+     </ClCompile>
+-    <Link>
+-      <AdditionalDependencies>vulkan-1.lib;%(AdditionalDependencies)</AdditionalDependencies>
+-    </Link>
+   </ItemDefinitionGroup>
+-</Project>
+\ No newline at end of file
++</Project>
+diff --git a/GameOverlay/d3d/exports.def b/GameOverlay/d3d/exports.def
+index 4334cd8..ecd6aa8 100644
+--- a/GameOverlay/d3d/exports.def
++++ b/GameOverlay/d3d/exports.def
+@@ -5,25 +5,4 @@ EXPORTS
+ 	CreateDXGIFactory2
+ 
+ 	; d3d12.dll
+-	D3D12CreateDevice
+-
+-	; vulkan-1.dll
+-	vkCreateDevice
+-	vkCreateSwapchainKHR
+-	vkDestroySwapchainKHR
+-	vkGetSwapchainImagesKHR
+-	vkQueuePresentKHR
+-	vkGetDeviceProcAddr
+-
+-	; LibOVRRT64_1.dll
+-	ovr_GetTextureSwapChainLength
+-	ovr_GetTextureSwapChainCurrentIndex
+-	ovr_CommitTextureSwapChain
+-	ovr_DestroyTextureSwapChain
+-	ovr_Destroy
+-	ovr_CreateTextureSwapChainDX
+-	ovr_GetTextureSwapChainBufferDX
+-	ovr_EndFrame
+-
+-	; openvr_api.dll
+-	VR_GetGenericInterface
+\ No newline at end of file
++	D3D12CreateDevice
+\ No newline at end of file
+diff --git a/GameOverlay/d3d/gameoverlay.vcxproj b/GameOverlay/d3d/gameoverlay.vcxproj
+index d185af7..0b04f2b 100644
+--- a/GameOverlay/d3d/gameoverlay.vcxproj
++++ b/GameOverlay/d3d/gameoverlay.vcxproj
+@@ -79,7 +79,7 @@
+       <Optimization>Disabled</Optimization>
+       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>true</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(SolutionDir)VR\LibOVR\Include;$(ProjectDir)source;$(SolutionDir)VR\openvr\headers;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(ProjectDir)source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalOptions>/std:c++latest %(AdditionalOptions)</AdditionalOptions>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+@@ -102,7 +102,7 @@
+       <Optimization>Disabled</Optimization>
+       <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>true</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(SolutionDir)VR\LibOVR\Include;$(ProjectDir)source;$(SolutionDir)VR\openvr\headers;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(ProjectDir)source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalOptions>/std:c++latest %(AdditionalOptions)</AdditionalOptions>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
+@@ -127,7 +127,7 @@
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>true</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(SolutionDir)VR\LibOVR\Include;$(ProjectDir)source;$(SolutionDir)VR\openvr\headers;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(ProjectDir)source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalOptions>/std:c++latest %(AdditionalOptions)</AdditionalOptions>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+     </ClCompile>
+@@ -154,7 +154,7 @@
+       <IntrinsicFunctions>true</IntrinsicFunctions>
+       <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+       <SDLCheck>true</SDLCheck>
+-      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(SolutionDir)VR\LibOVR\Include;$(ProjectDir)source;$(SolutionDir)VR\openvr\headers;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
++      <AdditionalIncludeDirectories>$(SolutionDir)Commons;$(SolutionDir)MinHook\include;$(ProjectDir)source;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+       <AdditionalOptions>/std:c++latest %(AdditionalOptions)</AdditionalOptions>
+       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+     </ClCompile>
+@@ -179,8 +179,6 @@
+     <ClCompile Include="source\d3d\dxgi.cpp" />
+     <ClCompile Include="source\d3d\DXGIWrapper.cpp" />
+     <ClCompile Include="source\d3d\dxgi_swapchain.cpp" />
+-    <ClCompile Include="source\d3d\oculus.cpp" />
+-    <ClCompile Include="source\d3d\steamvr.cpp" />
+     <ClCompile Include="source\hook.cpp" />
+     <ClCompile Include="source\hook_manager.cpp" />
+     <ClCompile Include="source\main.cpp" />
+@@ -195,8 +193,6 @@
+     <ClInclude Include="source\d3d\d3d12_renderer.hpp" />
+     <ClInclude Include="source\d3d\DXGIWrapper.h" />
+     <ClInclude Include="source\d3d\dxgi_swapchain.hpp" />
+-    <ClInclude Include="source\d3d\oculus.h" />
+-    <ClInclude Include="source\d3d\steamvr.h" />
+     <ClInclude Include="source\hook.hpp" />
+     <ClInclude Include="source\hook_manager.hpp" />
+   </ItemGroup>
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index 7e0d3fb..9c0bc5b 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -29,8 +29,6 @@
+ #include "hook_manager.hpp"
+ #include "Utility/ProcessHelper.h"
+ #include "DXGIWrapper.h"
+-#include "oculus.h"
+-#include "steamvr.h"
+ 
+ using namespace Microsoft::WRL;
+ 
+@@ -50,11 +48,6 @@ void hook_swapchain_object(IUnknown *device, T **swapchainTarget)
+     return;
+   }
+ 
+-  // compositors
+-  g_OculusD3D.reset(new CompositorOverlay::Oculus_D3D());
+-  g_OculusD3D->SetDevice(device);
+-  g_SteamVRD3D.reset(new CompositorOverlay::SteamVR_D3D());
+-  g_SteamVRD3D->SetDevice(device);
+   
+   // D3D11
+   {
+@@ -331,4 +324,4 @@ EXTERN_C HRESULT WINAPI D3D12CreateDevice(
+   CreateDXGIFactory(IID_PPV_ARGS((&factory)));
+   
+   return hr;
+-}
+\ No newline at end of file
++}
+diff --git a/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp b/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
+index 37573d6..bb9b207 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
+@@ -29,8 +29,6 @@
+ 
+ #include "Logging/MessageLog.h"
+ 
+-#include "oculus.h"
+-#include "steamvr.h"
+ 
+ using namespace Microsoft::WRL;
+ extern bool g_uwpApp;
+@@ -231,8 +229,6 @@ ULONG STDMETHODCALLTYPE DXGISwapChain::Release()
+       break;
+   }
+ 
+-  g_SteamVRD3D.reset();
+-  g_OculusD3D.reset();
+ 
+ 
+   return ref;
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index 34da5a5..6ceeae5 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -155,15 +155,6 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
+         // D3D12
+         GameOverlay::register_additional_module(L"d3d12.dll");
+ 
+-        // Oculus Compositor
+-#if _WIN64
+-        GameOverlay::register_additional_module(L"LibOVRRT64_1.dll");
+-#else
+-        GameOverlay::register_additional_module(L"LibOVRRT32_1.dll");
+-#endif
+-
+-        // SteamVR Compositor
+-        GameOverlay::register_additional_module(L"openvr_api.dll");
+       }
+       else
+       {
+diff --git a/DLLInjector/DLLInjector_Main.cpp b/DLLInjector/DLLInjector_Main.cpp
+index d6648de..bdfe0b4 100644
+--- a/DLLInjector/DLLInjector_Main.cpp
++++ b/DLLInjector/DLLInjector_Main.cpp
+@@ -22,6 +22,7 @@
+ 
+ #include <windows.h>
+ #include <codecvt>
++#include <cwchar>
+ #include <sstream>
+ #include <string>
+ 
+@@ -32,10 +33,10 @@
+ #include "Utility/ProcessHelper.h"
+ #include "Utility/StringUtils.h"
+ 
+-bool ParseArguments(int argc, char** argv, DLLInjection::Arguments& args, std::string& directory, bool& freeDLL);
++bool ParseArguments(int argc, wchar_t** argv, DLLInjection::Arguments& args, bool& freeDLL);
+ 
+ // arguments are -l dll path string and -p processID dword, -free optional to try and free the dll in the process
+-int main(int argc, char** argv)
++int wmain(int argc, wchar_t** argv)
+ {
+   if (!g_fileDirectory.Initialize())
+   {
+@@ -43,10 +44,9 @@ int main(int argc, char** argv)
+   }
+ 
+   DLLInjection::Arguments args;
+-  std::string directory;
+   bool freeDLL = false;
+ 
+-  if (!ParseArguments(argc, argv, args, directory, freeDLL)) {
++  if (!ParseArguments(argc, argv, args, freeDLL)) {
+     MessageBox(NULL, L"Invalid arguments for DLLInjector", NULL, MB_OK);
+     return false;
+   }
+@@ -94,30 +94,24 @@ int main(int argc, char** argv)
+   }
+ }
+ 
+-bool ParseArguments(int argc, char** argv, DLLInjection::Arguments& args, std::string& directory, bool& freeDLL)
++bool ParseArguments(int argc, wchar_t** argv, DLLInjection::Arguments& args, bool& freeDLL)
+ {
+   if (argc != 5 && argc != 6) {
+     return false;
+   }
+ 
+   for (int i = 0; i < argc; ++i) {
+-    if (!strcmp(argv[i], "-l")) {
+-      const std::string dllPath = { argv[++i] };
+-      args.dllPath = ConvertUTF8StringToUTF16String(dllPath);
+-
+-      const auto directoryEnd = dllPath.find_last_of('\\');
+-      const auto topDirPos = dllPath.find_last_of('\\', directoryEnd - 1);
+-      directory = dllPath.substr(0, topDirPos + 1);
+-
+-      args.dllName = args.dllPath.substr(directoryEnd + 1, args.dllPath.size() - directoryEnd + 1);
++    if (!std::wcscmp(argv[i], L"-l")) {
++      args.dllPath = argv[++i];
++      args.dllName = args.dllPath.substr(args.dllPath.find_last_of(L'\\') + 1);
+     }
+-    else if (!strcmp(argv[i], "-p")) {
+-      std::istringstream ss(argv[++i]);
++    else if (!std::wcscmp(argv[i], L"-p")) {
++      std::wistringstream ss(argv[++i]);
+       if (!(ss >> args.processID)) {
+         return false;
+       }
+     }
+-    else if (!strcmp(argv[i], "-free"))
++    else if (!std::wcscmp(argv[i], L"-free"))
+     {
+       freeDLL = true;
+     }
