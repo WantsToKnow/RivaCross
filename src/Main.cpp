@@ -16,7 +16,8 @@
 enum ControlId {
 	IdCrosshair = 101, IdX, IdY, IdScale, IdColor, IdMode,
 	IdHotkey, IdMaster, IdLoad, IdSaveAs, IdApply, IdVisible,
-	IdClipboard, IdKeep, IdStatus, IdLaunch, IdAttach
+	IdClipboard, IdKeep, IdStatus, IdLaunch, IdAttach,
+	IdNudgeUp, IdNudgeDown, IdNudgeLeft, IdNudgeRight
 };
 
 #ifndef RIVACROSS_OCAT
@@ -26,6 +27,7 @@ static const char* const OsdEntry = "RivaCross_crosshair";
 struct AppState {
 	HWND window, crosshair, x, y, scale, color, mode;
 	HWND hotkey, master, visibleButton, keep, status;
+	HWND pixelOffset;
 	HWND captureTarget;
 	HFONT font;
 	WNDPROC buttonProc;
@@ -76,6 +78,15 @@ static void refreshControls() {
 	SetWindowTextA(app.x, text);
 	snprintf(text, sizeof(text), "%d", app.config.position[1]);
 	SetWindowTextA(app.y, text);
+	snprintf(text, sizeof(text), "Fine X:%+d Y:%+d %s", app.config.pixelOffset[0],
+		app.config.pixelOffset[1],
+#ifdef RIVACROSS_OCAT
+		"px"
+#else
+		"units"
+#endif
+	);
+	SetWindowTextA(app.pixelOffset, text);
 	snprintf(text, sizeof(text), "%u", app.config.scale);
 	SetWindowTextA(app.scale, text);
 	snprintf(text, sizeof(text), "#%02X%02X%02X%02X", app.config.color[0],
@@ -174,6 +185,15 @@ static void applyAndSave() {
 	updateOverlay();
 	if (!saved) status("Could not save the preset file.");
 	refreshControls();
+}
+
+static void nudgePosition(int dx, int dy) {
+	if (!readControls()) return;
+	int* offset = &app.config.pixelOffset[dx ? 0 : 1];
+	int step = dx ? dx : dy;
+	if ((*offset == INT_MAX && step > 0) || (*offset == INT_MIN && step < 0)) return;
+	*offset += step;
+	applyAndSave();
 }
 
 static bool chooseFile(bool save, char* path) {
@@ -644,6 +664,11 @@ static void createControls() {
 		140, 62, 100, 25, IdX);
 	app.y = control("EDIT", "", WS_BORDER | WS_TABSTOP | ES_NUMBER,
 		255, 62, 100, 25, IdY);
+	control("BUTTON", "^", WS_TABSTOP, 405, 50, 28, 24, IdNudgeUp);
+	control("BUTTON", "<", WS_TABSTOP, 370, 77, 28, 24, IdNudgeLeft);
+	control("BUTTON", "v", WS_TABSTOP, 405, 77, 28, 24, IdNudgeDown);
+	control("BUTTON", ">", WS_TABSTOP, 440, 77, 28, 24, IdNudgeRight);
+	app.pixelOffset = control("STATIC", "", 0, 255, 106, 245, 22);
 	control("STATIC", "Size", 0, 20, 105, 110, 22);
 	app.scale = control("EDIT", "", WS_BORDER | WS_TABSTOP | ES_NUMBER,
 		140, 102, 100, 25, IdScale);
@@ -720,6 +745,10 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 			case IdLoad: loadPreset(); return 0;
 			case IdSaveAs: saveAs(); return 0;
 			case IdApply: applyAndSave(); return 0;
+			case IdNudgeUp: nudgePosition(0, -1); return 0;
+			case IdNudgeDown: nudgePosition(0, 1); return 0;
+			case IdNudgeLeft: nudgePosition(-1, 0); return 0;
+			case IdNudgeRight: nudgePosition(1, 0); return 0;
 #ifdef RIVACROSS_OCAT
 			case IdLaunch: launchGame(); return 0;
 			case IdAttach: attachRunning(); return 0;

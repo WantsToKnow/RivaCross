@@ -52,6 +52,8 @@ bool OCATSharedUpdate(const RTSSCrossConfig* config, bool visible) {
 	shared->visible = visible ? 1 : 0;
 	shared->x = config->position[0];
 	shared->y = config->position[1];
+	shared->pixelOffsetX = config->pixelOffset[0];
+	shared->pixelOffsetY = config->pixelOffset[1];
 	shared->size = (LONG)config->scale;
 	memcpy(shared->rgba, config->color, sizeof(shared->rgba));
 	memcpy(shared->text, config->crosshair, sizeof(shared->text));

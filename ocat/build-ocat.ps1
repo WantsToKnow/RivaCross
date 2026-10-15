@@ -18,31 +18,29 @@ if (-not (Test-Path -LiteralPath (Join-Path $sdk 'Include\vulkan\vulkan.h'))) {
   throw "Vulkan headers not found under $sdk\Include"
 }
 
-$patchNames = @('ocat-crosshair.patch', 'ocat-no-vr.patch', 'ocat-late-d3d11.patch')
-# The last patch changes context used by the earlier ones; recognize a fully patched tree first.
+$patchNames = @('ocat-crosshair.patch', 'ocat-no-vr.patch', 'ocat-late-d3d11.patch',
+  'ocat-test-corner.patch', 'ocat-pixel-nudge.patch')
+# Later patches can change earlier patch context, so find the newest applied patch.
 $ErrorActionPreference = 'Continue'
-& git -C $source apply --reverse --check (Join-Path $PSScriptRoot $patchNames[-1]) 2>$null
-$fullyPatched = $LASTEXITCODE -eq 0
-$ErrorActionPreference = 'Stop'
-if (-not $fullyPatched) {
-  foreach ($patchName in $patchNames) {
-    $patch = Join-Path $PSScriptRoot $patchName
-    $ErrorActionPreference = 'Continue' # Windows PowerShell treats expected git stderr as an error.
-    & git -C $source apply --check $patch 2>$null
-    $canApply = $LASTEXITCODE -eq 0
-    $alreadyApplied = $false
-    if (-not $canApply) {
-      & git -C $source apply --reverse --check $patch 2>$null
-      $alreadyApplied = $LASTEXITCODE -eq 0
-    }
-    $ErrorActionPreference = 'Stop'
-    if ($canApply) {
-      & git -C $source apply $patch
-      if ($LASTEXITCODE -ne 0) { throw "Could not apply $patchName" }
-    } elseif (-not $alreadyApplied) {
-      throw "$patchName does not apply cleanly"
-    }
+$appliedCount = 0
+for ($i = $patchNames.Count - 1; $i -ge 0; --$i) {
+  & git -C $source apply --reverse --check (Join-Path $PSScriptRoot $patchNames[$i]) 2>$null
+  if ($LASTEXITCODE -eq 0) {
+    $appliedCount = $i + 1
+    break
   }
+}
+$ErrorActionPreference = 'Stop'
+for ($i = $appliedCount; $i -lt $patchNames.Count; ++$i) {
+  $patchName = $patchNames[$i]
+  $patch = Join-Path $PSScriptRoot $patchName
+  $ErrorActionPreference = 'Continue' # Windows PowerShell treats expected git stderr as an error.
+  & git -C $source apply --check $patch 2>$null
+  $canApply = $LASTEXITCODE -eq 0
+  $ErrorActionPreference = 'Stop'
+  if (-not $canApply) { throw "$patchName does not apply cleanly" }
+  & git -C $source apply $patch
+  if ($LASTEXITCODE -ne 0) { throw "Could not apply $patchName" }
 }
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'

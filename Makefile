@@ -21,25 +21,25 @@ console: RivaCrossConsole.exe
 RivaCrossConsole.exe: $(CONSOLE_OBJS)
 	$(LINK) /NOLOGO $(CONSOLE_OBJS) /OUT:$@ /SUBSYSTEM:CONSOLE /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS) advapi32.lib lib\pdcurses.lib
 
-obj\GuiMain.obj: src\Main.cpp
+obj\GuiMain.obj: src\Main.cpp src\RivaCross.h src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\Main.cpp
 
-obj\OCATMain.obj: src\Main.cpp src\OCATShared.h src\OCATCrosshairShared.h
+obj\OCATMain.obj: src\Main.cpp src\RivaCross.h src\RTSShared.h src\OCATShared.h src\OCATCrosshairShared.h
 	$(CXX) $(CXXFLAGS) /DRIVACROSS_OCAT /c /Fo$@ src\Main.cpp
 
-obj\OCATShared.obj: src\OCATShared.cpp src\OCATShared.h src\OCATCrosshairShared.h
+obj\OCATShared.obj: src\OCATShared.cpp src\OCATShared.h src\RTSShared.h src\OCATCrosshairShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\OCATShared.cpp
 
-obj\ConsoleMain.obj: src\ConsoleMain.cpp
+obj\ConsoleMain.obj: src\ConsoleMain.cpp src\RivaCross.h src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\ConsoleMain.cpp
 
-obj\GuiCore.obj: src\Core.cpp
+obj\GuiCore.obj: src\Core.cpp src\RivaCross.h src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\Core.cpp
 
-obj\ConsoleRivaCross.obj: src\RivaCross.cpp
+obj\ConsoleRivaCross.obj: src\RivaCross.cpp src\RivaCross.h src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\RivaCross.cpp
 
-obj\GuiRTSShared.obj: src\RTSShared.cpp
+obj\GuiRTSShared.obj: src\RTSShared.cpp src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\RTSShared.cpp
 
 clean:

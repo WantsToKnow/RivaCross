@@ -1,0 +1,341 @@
+diff --git a/Commons/Rendering/OverlayBitmap.cpp b/Commons/Rendering/OverlayBitmap.cpp
+index fb01ec7..c8313f2 100644
+--- a/Commons/Rendering/OverlayBitmap.cpp
++++ b/Commons/Rendering/OverlayBitmap.cpp
+@@ -97,8 +97,8 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
+     return false;
+   }
+ 
+-  rivaCrossTestFormat_.Attach(CreateTextFormat(48.0f,
+-      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER));
++  rivaCrossTestFormat_.Attach(CreateTextFormat(24.0f,
++      DWRITE_TEXT_ALIGNMENT_TRAILING, DWRITE_PARAGRAPH_ALIGNMENT_CENTER));
+   if (!rivaCrossTestFormat_) return false;
+ 
+   if (!rivaCrossMode_ && !InitText()) {
+@@ -166,12 +166,14 @@ OverlayBitmap::~OverlayBitmap()
+ void OverlayBitmap::CalcSize(int screenWidth, int screenHeight)
+ {
+   if (rivaCrossMode_) {
+-    fullWidth_ = rivaCrossTileSize_ / 2;
++    // One small atlas: crosshair tile on the left, test label on the right.
++    fullWidth_ = rivaCrossTileSize_;
+     fullHeight_ = rivaCrossTileSize_;
+     barWidth_ = 0;
+     Resize(screenWidth, screenHeight);
+-    fullArea_.d2d1 = D2D1::RectF(0.0f, 0.0f, rivaCrossTileSize_, rivaCrossTileSize_);
+-    fullArea_.wic = {0, 0, rivaCrossTileSize_, rivaCrossTileSize_};
++    fullArea_.d2d1 = D2D1::RectF(0.0f, 0.0f, rivaCrossTileSize_ * 2.0f,
++                                rivaCrossTileSize_);
++    fullArea_.wic = {0, 0, rivaCrossTileSize_ * 2, rivaCrossTileSize_};
+     return;
+   }
+ 
+@@ -444,12 +446,15 @@ void OverlayBitmap::DrawRivaCross()
+   renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
+   if (rivaCrossState_.visible && rivaCrossState_.text[0]) DrawRivaCrossGlyph();
+ 
+-  // Temporary diagnostic: if this is absent, OCAT did not render into the game.
+-  textBrush_->SetColor(D2D1::ColorF(0.85f, 0.0f, 0.0f, 1.0f));
+-  const auto banner = D2D1::RectF(24.0f, 8.0f, 232.0f, 78.0f);
+-  renderTarget_->FillRectangle(banner, textBrush_.Get());
++  // Temporary diagnostic, rendered from the atlas into the screen's top-right.
++  const auto shadow = D2D1::RectF(rivaCrossTileSize_ + 1.0f, 1.0f,
++                                  rivaCrossTileSize_ + 97.0f, 41.0f);
++  const auto label = D2D1::RectF(rivaCrossTileSize_ + 0.0f, 0.0f,
++                                 rivaCrossTileSize_ + 96.0f, 40.0f);
++  textBrush_->SetColor(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.9f));
++  renderTarget_->DrawText(L"TEST", 4, rivaCrossTestFormat_.Get(), shadow, textBrush_.Get());
+   textBrush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.0f, 1.0f));
+-  renderTarget_->DrawText(L"TEST", 4, rivaCrossTestFormat_.Get(), banner, textBrush_.Get());
++  renderTarget_->DrawText(L"TEST", 4, rivaCrossTestFormat_.Get(), label, textBrush_.Get());
+ }
+ 
+ void OverlayBitmap::DrawRivaCrossGlyph()
+@@ -481,7 +486,9 @@ void OverlayBitmap::DrawRivaCrossGlyph()
+   textBrush_->SetColor(D2D1::ColorF(rgba[0] / 255.0f, rgba[1] / 255.0f,
+                                    rgba[2] / 255.0f, rgba[3] / 255.0f));
+   renderTarget_->DrawText(glyph.c_str(), static_cast<UINT32>(glyph.size()),
+-                          rivaCrossFormat_.Get(), fullArea_.d2d1, textBrush_.Get());
++                          rivaCrossFormat_.Get(),
++                          D2D1::RectF(0.0f, 0.0f, rivaCrossTileSize_, rivaCrossTileSize_),
++                          textBrush_.Get());
+ }
+ 
+ void OverlayBitmap::DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameInfo& frameInfo)
+@@ -686,6 +693,11 @@ void OverlayBitmap::UnlockBitmapData() { bitmapLock_.Reset(); }
+ 
+ int OverlayBitmap::GetFullWidth() const { return fullWidth_ * 2; }
+ 
++int OverlayBitmap::GetDrawWidth() const
++{
++  return rivaCrossMode_ ? rivaCrossTileSize_ : GetFullWidth();
++}
++
+ int OverlayBitmap::GetFullHeight() const
+ {
+   return rivaCrossMode_ ? rivaCrossTileSize_ : screenHeight_;
+@@ -693,6 +705,16 @@ int OverlayBitmap::GetFullHeight() const
+ 
+ OverlayBitmap::Position OverlayBitmap::GetScreenPos() const { return screenPosition_; }
+ 
++OverlayBitmap::Position OverlayBitmap::GetTestScreenPos() const
++{
++  return { screenWidth_ > 112 ? screenWidth_ - 112 : 0, 16 };
++}
++
++OverlayBitmap::Position OverlayBitmap::GetTestSize() const
++{
++  return rivaCrossMode_ ? Position{96, 40} : Position{0, 0};
++}
++
+ const D2D1_RECT_F& OverlayBitmap::GetCopyArea() const { return fullArea_.d2d1; }
+ 
+ VkFormat OverlayBitmap::GetVKFormat() const { return VK_FORMAT_B8G8R8A8_UNORM; }
+diff --git a/Commons/Rendering/OverlayBitmap.h b/Commons/Rendering/OverlayBitmap.h
+index 75153fd..7098081 100644
+--- a/Commons/Rendering/OverlayBitmap.h
++++ b/Commons/Rendering/OverlayBitmap.h
+@@ -76,7 +76,10 @@ public:
+ 
+   int GetFullWidth() const;
+   int GetFullHeight() const;
++  int GetDrawWidth() const;
+   Position GetScreenPos() const;
++  Position GetTestScreenPos() const;
++  Position GetTestSize() const;
+   const D2D1_RECT_F& GetCopyArea() const;
+   VkFormat GetVKFormat() const;
+ 
+diff --git a/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
+index 7d89c26..a376913 100644
+--- a/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
+@@ -142,6 +142,12 @@ bool d3d11_renderer::RecordOverlayCommandList()
+       overlayContext->PSSetConstantBuffers(0, 1, cbs);
+       overlayContext->RSSetViewports(1, &viewPort_);
+       overlayContext->Draw(3, 0);
++      if (overlayBitmap_->GetTestSize().x) {
++        cbs[0] = testOffsetCB_.Get();
++        overlayContext->PSSetConstantBuffers(0, 1, cbs);
++        overlayContext->RSSetViewports(1, &testViewPort_);
++        overlayContext->Draw(3, 0);
++      }
+     }
+     else {
+       overlayContext->PSSetShader(lagIndicatorPS_.Get(), nullptr, 0);
+@@ -256,6 +262,12 @@ bool d3d11_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+         context_->PSSetConstantBuffers(0, 1, cbs);
+         context_->RSSetViewports(1, &viewPort_);
+         context_->Draw(3, 0);
++        if (overlayBitmap_->GetTestSize().x) {
++          cbs[0] = testOffsetCB_.Get();
++          context_->PSSetConstantBuffers(0, 1, cbs);
++          context_->RSSetViewports(1, &testViewPort_);
++          context_->Draw(3, 0);
++        }
+       }
+       else {
+         context_->PSSetShader(lagIndicatorPS_.Get(), nullptr, 0);
+@@ -420,6 +432,11 @@ bool d3d11_renderer::CreateOverlayResources(int backBufferWidth, int backBufferH
+     return false;
+   }
+ 
++  if (overlayBitmap_->GetTestSize().x) {
++    hr = device_->CreateBuffer(&constantBufferDesc, NULL, &testOffsetCB_);
++    if (FAILED(hr)) return false;
++  }
++
+   // create lag meter key down constant buffer
+ 
+   constantBufferDesc.ByteWidth = static_cast<UINT>(sizeof(int)*4);
+@@ -454,14 +471,18 @@ bool d3d11_renderer::CreateOverlayResources(int backBufferWidth, int backBufferH
+ 
+ bool d3d11_renderer::UpdateOverlayPosition()
+ {
+-  const auto width = static_cast<float>(overlayBitmap_->GetFullWidth());
++  const auto width = static_cast<float>(overlayBitmap_->GetDrawWidth());
+   const auto height = static_cast<float>(overlayBitmap_->GetFullHeight());
+   const auto screenPos = overlayBitmap_->GetScreenPos();
+   const auto screenPosX = static_cast<float>(screenPos.x);
+   const auto screenPosY = static_cast<float>(screenPos.y);
++  const auto testPos = overlayBitmap_->GetTestScreenPos();
++  const auto testSize = overlayBitmap_->GetTestSize();
+ 
+   if (viewPort_.Width == width && viewPort_.Height == height && viewPort_.TopLeftX == screenPosX &&
+-      viewPort_.TopLeftY == screenPosY) {
++      viewPort_.TopLeftY == screenPosY &&
++      (!testSize.x || (testViewPort_.TopLeftX == testPos.x &&
++                       testViewPort_.TopLeftY == testPos.y))) {
+     // Overlay position is up to date.
+     return true;
+   }
+@@ -482,9 +503,25 @@ bool d3d11_renderer::UpdateOverlayPosition()
+   std::memcpy(pConstantBuffer, &constantBuffer, sizeof(ConstantBuffer));
+   context_->Unmap(viewportOffsetCB_.Get(), 0);
+ 
++  if (testSize.x) {
++    constantBuffer.screenPosX = static_cast<float>(testPos.x - overlayBitmap_->GetDrawWidth());
++    constantBuffer.screenPosY = static_cast<float>(testPos.y);
++    hr = context_->Map(testOffsetCB_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mappedResource);
++    if (FAILED(hr)) return false;
++    std::memcpy(mappedResource.pData, &constantBuffer, sizeof(ConstantBuffer));
++    context_->Unmap(testOffsetCB_.Get(), 0);
++
++    testViewPort_.TopLeftX = static_cast<float>(testPos.x);
++    testViewPort_.TopLeftY = static_cast<float>(testPos.y);
++    testViewPort_.Width = static_cast<float>(testSize.x);
++    testViewPort_.Height = static_cast<float>(testSize.y);
++    testViewPort_.MaxDepth = 1.0f;
++    testViewPort_.MinDepth = 0.0f;
++  }
++
+   // update the viewport
+-  viewPort_.TopLeftX = constantBuffer.screenPosX;
+-  viewPort_.TopLeftY = constantBuffer.screenPosY;
++  viewPort_.TopLeftX = screenPosX;
++  viewPort_.TopLeftY = screenPosY;
+   viewPort_.Width = width;
+   viewPort_.Height = height;
+   viewPort_.MaxDepth = 1.0f;
+diff --git a/GameOverlay/d3d/source/d3d/d3d11_renderer.hpp b/GameOverlay/d3d/source/d3d/d3d11_renderer.hpp
+index d99e8ce..e691c9a 100644
+--- a/GameOverlay/d3d/source/d3d/d3d11_renderer.hpp
++++ b/GameOverlay/d3d/source/d3d/d3d11_renderer.hpp
+@@ -79,12 +79,14 @@ class d3d11_renderer final {
+   Microsoft::WRL::ComPtr<ID3D11Texture2D> displayTexture_;
+   Microsoft::WRL::ComPtr<ID3D11ShaderResourceView> displaySRV_;
+   Microsoft::WRL::ComPtr<ID3D11Buffer> viewportOffsetCB_;
++  Microsoft::WRL::ComPtr<ID3D11Buffer> testOffsetCB_;
+   Microsoft::WRL::ComPtr<ID3D11Buffer> lagIndicatorCB_;
+   std::vector<Microsoft::WRL::ComPtr<ID3D11RenderTargetView>> renderTargets_;
+   Microsoft::WRL::ComPtr<ID3D11RasterizerState> rasterizerState_;
+   Microsoft::WRL::ComPtr<ID3D11BlendState> blendState_;
+   std::vector<Microsoft::WRL::ComPtr<ID3D11CommandList>> overlayCommandList_;
+   D3D11_VIEWPORT viewPort_;
++  D3D11_VIEWPORT testViewPort_;
+   D3D11_VIEWPORT lagIndicatorViewPort_;
+   std::unique_ptr<OverlayBitmap> overlayBitmap_;
+ 
+@@ -92,4 +94,4 @@ class d3d11_renderer final {
+ 
+   InitializationStatus status = InitializationStatus::UNINITIALIZED;
+ };
+-}  // namespace GameOverlay
+\ No newline at end of file
++}  // namespace GameOverlay
+diff --git a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+index bfc2eb6..47d7c2f 100644
+--- a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+@@ -162,7 +162,7 @@ bool d3d12_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+ 
+ void d3d12_renderer::UpdateOverlayPosition()
+ {
+-  const auto width = overlayBitmap_->GetFullWidth();
++  const auto width = overlayBitmap_->GetDrawWidth();
+   const auto height = overlayBitmap_->GetFullHeight();
+   const auto screenPos = overlayBitmap_->GetScreenPos();
+   ConstantBuffer constantBuffer;
+@@ -182,7 +182,23 @@ void d3d12_renderer::UpdateOverlayPosition()
+   rectScissor_.right = screenPos.x + width;
+   rectScissor_.bottom = screenPos.y + height;
+ 
+-  UpdateConstantBuffer(constantBuffer);
++  UpdateConstantBuffer(viewportOffsetCB_.Get(), constantBuffer);
++
++  const auto testSize = overlayBitmap_->GetTestSize();
++  if (testSize.x) {
++    const auto testPos = overlayBitmap_->GetTestScreenPos();
++    testViewPort_.TopLeftX = static_cast<float>(testPos.x);
++    testViewPort_.TopLeftY = static_cast<float>(testPos.y);
++    testViewPort_.Width = static_cast<float>(testSize.x);
++    testViewPort_.Height = static_cast<float>(testSize.y);
++    testViewPort_.MinDepth = 0.0f;
++    testViewPort_.MaxDepth = 1.0f;
++    testRectScissor_ = {testPos.x, testPos.y,
++                        testPos.x + testSize.x, testPos.y + testSize.y};
++    constantBuffer.screenPosX = static_cast<float>(testPos.x - width);
++    constantBuffer.screenPosY = static_cast<float>(testPos.y);
++    UpdateConstantBuffer(testOffsetCB_.Get(), constantBuffer);
++  }
+ }
+ 
+ bool d3d12_renderer::CreateCMDList()
+@@ -513,6 +529,14 @@ bool d3d12_renderer::CreateConstantBuffer()
+     return false;
+   }
+ 
++  if (overlayBitmap_->GetTestSize().x) {
++    hr = device_->CreateCommittedResource(
++      &uploadHeapProperties, D3D12_HEAP_FLAG_NONE,
++      &bufDesc, D3D12_RESOURCE_STATE_GENERIC_READ,
++      nullptr, IID_PPV_ARGS(&testOffsetCB_));
++    if (FAILED(hr)) return false;
++  }
++
+   //&CD3DX12_RESOURCE_DESC::Buffer(sizeof(int) * 4)
+ 
+   lagIndicatorKeyDownCB_.Reset();
+@@ -529,10 +553,11 @@ bool d3d12_renderer::CreateConstantBuffer()
+   return true;
+ }
+ 
+-void d3d12_renderer::UpdateConstantBuffer(const ConstantBuffer& constantBuffer)
++void d3d12_renderer::UpdateConstantBuffer(ID3D12Resource* buffer,
++                                           const ConstantBuffer& constantBuffer)
+ {
+   void* mappedMemory;
+-  HRESULT hr = viewportOffsetCB_->Map(0, nullptr, &mappedMemory);
++  HRESULT hr = buffer->Map(0, nullptr, &mappedMemory);
+   if (FAILED(hr)) {
+     g_messageLog.LogError("D3D12", "UpdateConstantBuffer - failed to update constant buffer.", hr);
+     return;
+@@ -540,7 +565,7 @@ void d3d12_renderer::UpdateConstantBuffer(const ConstantBuffer& constantBuffer)
+   ConstantBuffer* mappedConstantBuffer = static_cast<ConstantBuffer*>(mappedMemory);
+   mappedConstantBuffer->screenPosX = constantBuffer.screenPosX;
+   mappedConstantBuffer->screenPosY = constantBuffer.screenPosY;
+-  viewportOffsetCB_->Unmap(0, nullptr);
++  buffer->Unmap(0, nullptr);
+ }
+ 
+ void d3d12_renderer::UpdateOverlayTexture(int backBufferIndex)
+@@ -658,6 +683,13 @@ void d3d12_renderer::DrawOverlay(int currentIndex, bool lagIndicatorState)
+ 
+   commandList_->DrawInstanced(3, 1, 0, 0);
+ 
++  if (overlayBitmap_->GetTestSize().x && !overlayBitmap_->GetLagIndicatorVisibility()) {
++    commandList_->SetGraphicsRootConstantBufferView(1, testOffsetCB_->GetGPUVirtualAddress());
++    commandList_->RSSetViewports(1, &testViewPort_);
++    commandList_->RSSetScissorRects(1, &testRectScissor_);
++    commandList_->DrawInstanced(3, 1, 0, 0);
++  }
++
+   const auto transitionPresent = CD3DX12_RESOURCE_BARRIER::Transition(
+     renderTargets_[currentIndex].Get(), D3D12_RESOURCE_STATE_RENDER_TARGET,
+     D3D12_RESOURCE_STATE_PRESENT, 0);
+diff --git a/GameOverlay/d3d/source/d3d/d3d12_renderer.hpp b/GameOverlay/d3d/source/d3d/d3d12_renderer.hpp
+index 098451a..99bc54e 100644
+--- a/GameOverlay/d3d/source/d3d/d3d12_renderer.hpp
++++ b/GameOverlay/d3d/source/d3d/d3d12_renderer.hpp
+@@ -61,7 +61,7 @@ private:
+   bool CreatePipelineStateObject();
+   bool CreateOverlayTextures();
+   bool CreateConstantBuffer();
+-  void UpdateConstantBuffer(const ConstantBuffer & constantBuffer);
++  void UpdateConstantBuffer(ID3D12Resource* buffer, const ConstantBuffer & constantBuffer);
+ 
+   void UpdateOverlayTexture(int backBufferIndex);
+   void UpdateOverlayPosition();
+@@ -94,8 +94,11 @@ private:
+   Microsoft::WRL::ComPtr<ID3D12DescriptorHeap> displayHeap_;
+ 
+   Microsoft::WRL::ComPtr<ID3D12Resource> viewportOffsetCB_;
++  Microsoft::WRL::ComPtr<ID3D12Resource> testOffsetCB_;
+   D3D12_VIEWPORT viewPort_;
+   D3D12_RECT rectScissor_;
++  D3D12_VIEWPORT testViewPort_;
++  D3D12_RECT testRectScissor_;
+ 
+   Microsoft::WRL::ComPtr<ID3D12Resource> lagIndicatorKeyDownCB_;
+   D3D12_VIEWPORT lagIndicatorViewPort_;

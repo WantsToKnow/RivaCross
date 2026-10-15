@@ -13,6 +13,8 @@ bool initConfig(RTSSCrossConfig* config) {
 	strcpy(config->crosshair, "O");
 	config->position[0] = 477;
 	config->position[1] = 265;
+	config->pixelOffset[0] = 0;
+	config->pixelOffset[1] = 0;
 	config->color[0] = 0xFF;
 	config->color[1] = 0xFF;
 	config->color[2] = 0xFF;
@@ -113,7 +115,16 @@ int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 			++hotkeyLines;
 		}
 		if (status < 0 || hotkeyLines == 1) break;
-		if (hotkeyLines == 5 && readConfigLine(file, line, sizeof(line)) != 0) break;
+		if (hotkeyLines == 5) {
+			status = readConfigLine(file, line, sizeof(line));
+			if (status < 0) break;
+			if (status == 1) {
+				if (!parseConfigInt(line, INT_MIN, INT_MAX, &parsed.pixelOffset[0]) ||
+					readConfigLine(file, line, sizeof(line)) != 1 ||
+					!parseConfigInt(line, INT_MIN, INT_MAX, &parsed.pixelOffset[1]) ||
+					readConfigLine(file, line, sizeof(line)) != 0) break;
+			}
+		}
 		result = 0;
 	} while (false);
 	fclose(file);
@@ -153,6 +164,8 @@ bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeySta
 	// Master toggle
 	fprintf(file, "%d\n", hs->masterKeyCode);
 	fprintf(file, "%d\n", hs->masterModifierMask);
+	fprintf(file, "%d\n", config->pixelOffset[0]);
+	fprintf(file, "%d\n", config->pixelOffset[1]);
 	bool success = ferror(file) == 0;
 	if (fclose(file) != 0) success = false;
 	return success;

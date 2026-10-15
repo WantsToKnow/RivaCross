@@ -43,6 +43,8 @@ Click a hotkey field and press a key or mouse button (left, right, middle, or
 side); Esc cancels and Backspace clears it.
 Keep the window open (it can be minimized) to use hotkeys. Closing it releases
 the RTSS overlay unless "Leave crosshair visible when closing" is checked.
+The arrow buttons beside X/Y adjust one RTSS position unit per click and save
+immediately; the on-screen pixel distance depends on RTSS's OSD settings.
 
 The previous text interface is available as the optional `RivaCrossConsole.exe` build.
 
@@ -69,8 +71,13 @@ minimized) while playing. Closing the GUI hides the crosshair and releases the
 shared-memory block. Position uses a 960 x 540 reference grid. The bundled
 DLL's launch-time renderer targets Direct3D 11 and 12; Vulkan is not included.
 
-The OCAT DLL currently draws a large red/yellow `TEST` label near the crosshair
-position (the screen center without the GUI), even if the crosshair is hidden.
+In the OCAT GUI, the four arrow buttons beside X/Y move the crosshair by one
+actual game-image pixel per click. The signed Fine X/Y offsets are saved with
+the preset; existing presets start with zero offsets.
+Restart a game that already loaded an older OCAT DLL before testing the new build.
+
+The OCAT DLL currently draws a small `TEST` label without a background in the
+top-right corner of the game image, even if the crosshair is hidden.
 This temporary marker confirms only that the DLL reached the game's renderer.
 It stays visible until the target program exits, including after the GUI closes.
 Starting a game from Steam alone does not load this DLL. CS2 is excluded from
