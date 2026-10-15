@@ -63,6 +63,13 @@ shared-memory block. Position uses a 960 x 540 reference grid. The GUI cannot
 verify whether a game actually displays the crosshair. The bundled DLL targets
 Direct3D 11 and 12; Vulkan is not included.
 
+The OCAT DLL currently draws a large red/yellow `TEST` label near the crosshair
+position (the screen center without the GUI), even if the crosshair is hidden.
+This temporary marker confirms only that the DLL reached the game's renderer.
+Steam-launched games are not injected by `RivaCrossOCAT.exe`, so the marker will
+not appear in Steam-launched CS2. Do not try to force the DLL into CS2 Trusted
+Mode: [Valve says targeted third-party injection can risk a VAC ban](https://help.steampowered.com/en/faqs/view/09A0-4879-4353-EF95).
+
 For bug reports or feature suggestions please use the 
 [Issues section](https://github.com/irseny/RivaCross/issues).
 

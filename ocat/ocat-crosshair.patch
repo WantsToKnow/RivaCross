@@ -26,7 +26,7 @@ index 0000000..8bc991d
 +	char text[64];
 +};
 diff --git a/Commons/Rendering/OverlayBitmap.cpp b/Commons/Rendering/OverlayBitmap.cpp
-index adc8073..4ff40ca 100644
+index adc8073..fb01ec7 100644
 --- a/Commons/Rendering/OverlayBitmap.cpp
 +++ b/Commons/Rendering/OverlayBitmap.cpp
 @@ -27,6 +27,7 @@
@@ -37,18 +37,19 @@ index adc8073..4ff40ca 100644
  
  using namespace Microsoft::WRL;
  
-@@ -70,6 +71,21 @@ OverlayBitmap::OverlayBitmap()
+@@ -70,6 +71,22 @@ OverlayBitmap::OverlayBitmap()
  
  bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
  {
++  // The diagnostic label must appear even when the GUI has not created its mapping.
++  rivaCrossMode_ = true;
++  rivaCrossState_.x = 480;
++  rivaCrossState_.y = 270;
 +  rivaCrossMapping_ = OpenFileMappingW(FILE_MAP_READ, FALSE, RIVACROSS_OCAT_MAPPING_NAME);
 +  if (rivaCrossMapping_) {
 +    rivaCrossView_ = static_cast<const OCATCrosshairShared*>(
 +        MapViewOfFile(rivaCrossMapping_, FILE_MAP_READ, 0, 0, sizeof(OCATCrosshairShared)));
 +    if (rivaCrossView_) {
-+      rivaCrossMode_ = true;
-+      rivaCrossState_.x = 480;
-+      rivaCrossState_.y = 270;
 +      ReadRivaCrossState();
 +    } else {
 +      CloseHandle(rivaCrossMapping_);
@@ -59,16 +60,20 @@ index adc8073..4ff40ca 100644
    if (!InitFactories()) {
      return false;
    }
-@@ -80,7 +96,7 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
+@@ -80,7 +97,11 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
      return false;
    }
  
 -  if (!InitText()) {
++  rivaCrossTestFormat_.Attach(CreateTextFormat(48.0f,
++      DWRITE_TEXT_ALIGNMENT_CENTER, DWRITE_PARAGRAPH_ALIGNMENT_CENTER));
++  if (!rivaCrossTestFormat_) return false;
++
 +  if (!rivaCrossMode_ && !InitText()) {
      return false;
    }
  
-@@ -105,6 +121,9 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
+@@ -105,6 +126,9 @@ bool OverlayBitmap::Init(int screenWidth, int screenHeight, API api)
  
  OverlayBitmap::~OverlayBitmap()
  {
@@ -78,15 +83,16 @@ index adc8073..4ff40ca 100644
    for (int i = 0; i < alignmentCount_; ++i) {
      fpsMessage_[i].reset();
      msMessage_[i].reset();
-@@ -125,6 +144,7 @@ OverlayBitmap::~OverlayBitmap()
+@@ -125,6 +149,8 @@ OverlayBitmap::~OverlayBitmap()
    stopMessageFormat_.Reset();
    recordingMessageFormat_.Reset();
    graphLabelMessagFormat_.Reset();
 +  rivaCrossFormat_.Reset();
++  rivaCrossTestFormat_.Reset();
    iwicFactory_.Reset();
    bitmap_.Reset();
    bitmapLock_.Reset();
-@@ -139,6 +159,16 @@ OverlayBitmap::~OverlayBitmap()
+@@ -139,6 +165,16 @@ OverlayBitmap::~OverlayBitmap()
  
  void OverlayBitmap::CalcSize(int screenWidth, int screenHeight)
  {
@@ -103,7 +109,7 @@ index adc8073..4ff40ca 100644
    fullWidth_ = 256;
    fullHeight_ = lineHeight_ * 8;
    messageHeight_ = lineHeight_ * 3;
-@@ -298,6 +328,14 @@ void OverlayBitmap::Resize(int screenWidth, int screenHeight)
+@@ -298,6 +334,14 @@ void OverlayBitmap::Resize(int screenWidth, int screenHeight)
  
  void OverlayBitmap::UpdateScreenPosition()
  {
@@ -118,7 +124,7 @@ index adc8073..4ff40ca 100644
    const auto overlayPosition = RecordingState::GetInstance().GetOverlayPosition();
    if (IsLowerOverlayPosition(overlayPosition)) {
      if (IsLeftOverlayPosition(overlayPosition)) {
-@@ -340,6 +378,13 @@ void OverlayBitmap::StartRendering()
+@@ -340,6 +384,13 @@ void OverlayBitmap::StartRendering()
  
  void OverlayBitmap::Update()
  {
@@ -132,7 +138,7 @@ index adc8073..4ff40ca 100644
    const auto textureState = RecordingState::GetInstance().Update();
    if (RecordingState::GetInstance().Started()) {
      performanceCounter_.Start();
-@@ -367,6 +412,62 @@ void OverlayBitmap::Update()
+@@ -367,6 +418,72 @@ void OverlayBitmap::Update()
    currentFrame_ = (currentFrame_ + 1) % 512;
  }
  
@@ -160,8 +166,18 @@ index adc8073..4ff40ca 100644
 +void OverlayBitmap::DrawRivaCross()
 +{
 +  renderTarget_->Clear(D2D1::ColorF(0.0f, 0.0f, 0.0f, 0.0f));
-+  if (!rivaCrossState_.visible || !rivaCrossState_.text[0]) return;
++  if (rivaCrossState_.visible && rivaCrossState_.text[0]) DrawRivaCrossGlyph();
 +
++  // Temporary diagnostic: if this is absent, OCAT did not render into the game.
++  textBrush_->SetColor(D2D1::ColorF(0.85f, 0.0f, 0.0f, 1.0f));
++  const auto banner = D2D1::RectF(24.0f, 8.0f, 232.0f, 78.0f);
++  renderTarget_->FillRectangle(banner, textBrush_.Get());
++  textBrush_->SetColor(D2D1::ColorF(1.0f, 1.0f, 0.0f, 1.0f));
++  renderTarget_->DrawText(L"TEST", 4, rivaCrossTestFormat_.Get(), banner, textBrush_.Get());
++}
++
++void OverlayBitmap::DrawRivaCrossGlyph()
++{
 +  int size = static_cast<int>(rivaCrossState_.size);
 +  if (size < 1) size = 1;
 +  if (size > rivaCrossTileSize_ - 8) size = rivaCrossTileSize_ - 8;
@@ -195,7 +211,7 @@ index adc8073..4ff40ca 100644
  void OverlayBitmap::DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameInfo& frameInfo)
  {
    const int alignment = static_cast<int>(currentAlignment_);
-@@ -413,7 +514,8 @@ void OverlayBitmap::DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameIn
+@@ -413,7 +530,8 @@ void OverlayBitmap::DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameIn
  }
  
  bool OverlayBitmap::HideOverlay()
@@ -205,7 +221,7 @@ index adc8073..4ff40ca 100644
    return (RecordingState::GetInstance().IsRecording() &&
            RecordingState::GetInstance().IsOverlayDuringCaptureHidden());
  }
-@@ -523,11 +625,13 @@ void OverlayBitmap::DrawBar()
+@@ -523,11 +641,13 @@ void OverlayBitmap::DrawBar()
  
  int OverlayBitmap::GetLagIndicatorHotkey()
  {
@@ -219,7 +235,7 @@ index adc8073..4ff40ca 100644
    return RecordingState::GetInstance().IsLagIndicatorShowing();
  }
  
-@@ -566,7 +670,10 @@ void OverlayBitmap::UnlockBitmapData() { bitmapLock_.Reset(); }
+@@ -566,7 +686,10 @@ void OverlayBitmap::UnlockBitmapData() { bitmapLock_.Reset(); }
  
  int OverlayBitmap::GetFullWidth() const { return fullWidth_ * 2; }
  
@@ -231,7 +247,7 @@ index adc8073..4ff40ca 100644
  
  OverlayBitmap::Position OverlayBitmap::GetScreenPos() const { return screenPosition_; }
  
-@@ -609,7 +716,8 @@ bool OverlayBitmap::InitFactories()
+@@ -609,7 +732,8 @@ bool OverlayBitmap::InitFactories()
  bool OverlayBitmap::InitBitmap()
  {
    HRESULT hr = iwicFactory_->CreateBitmap(
@@ -242,7 +258,7 @@ index adc8073..4ff40ca 100644
      g_messageLog.LogError("OverlayBitmap", "CreateBitmap failed, HRESULT", hr);
      return false;
 diff --git a/Commons/Rendering/OverlayBitmap.h b/Commons/Rendering/OverlayBitmap.h
-index 007dec7..3bac9bb 100644
+index 007dec7..75153fd 100644
 --- a/Commons/Rendering/OverlayBitmap.h
 +++ b/Commons/Rendering/OverlayBitmap.h
 @@ -31,6 +31,7 @@
@@ -253,20 +269,22 @@ index 007dec7..3bac9bb 100644
  #include "TextMessage.h"
  
  // Render overlay text with background into a bitmap.
-@@ -107,6 +108,8 @@ private:
+@@ -107,6 +108,9 @@ private:
    void InitTextForAlignment(Alignment alignment);
  
    void Update();
 +  bool ReadRivaCrossState();
 +  void DrawRivaCross();
++  void DrawRivaCrossGlyph();
    void StartRendering();
    void DrawFrameInfo(const GameOverlay::PerformanceCounter::FrameInfo& frameInfo);
    void DrawMessages(TextureState textureState);
-@@ -142,12 +145,14 @@ private:
+@@ -142,12 +146,15 @@ private:
    Microsoft::WRL::ComPtr<IDWriteTextFormat> stopMessageFormat_;
    Microsoft::WRL::ComPtr<IDWriteTextFormat> recordingMessageFormat_;
    Microsoft::WRL::ComPtr<IDWriteTextFormat> graphLabelMessagFormat_;
 +  Microsoft::WRL::ComPtr<IDWriteTextFormat> rivaCrossFormat_;
++  Microsoft::WRL::ComPtr<IDWriteTextFormat> rivaCrossTestFormat_;
  
    Microsoft::WRL::ComPtr<IWICImagingFactory> iwicFactory_;
    Microsoft::WRL::ComPtr<IWICBitmap> bitmap_;
@@ -277,7 +295,7 @@ index 007dec7..3bac9bb 100644
    std::unique_ptr<TextMessage> fpsMessage_[alignmentCount_];
    std::unique_ptr<TextMessage> msMessage_[alignmentCount_];
    std::unique_ptr<TextMessage> stateMessage_[alignmentCount_];
-@@ -191,6 +196,12 @@ private:
+@@ -191,6 +198,12 @@ private:
    bool coInitialized_ = false;
    Alignment currentAlignment_ = Alignment::UpperLeft;
  
@@ -291,41 +309,34 @@ index 007dec7..3bac9bb 100644
    std::wstring api_;
  };
 diff --git a/Commons/Utility/FileDirectory.cpp b/Commons/Utility/FileDirectory.cpp
-index 8ecbf8e..41402a2 100644
+index 8ecbf8e..c8a7a91 100644
 --- a/Commons/Utility/FileDirectory.cpp
 +++ b/Commons/Utility/FileDirectory.cpp
-@@ -23,8 +23,10 @@
+@@ -23,6 +23,7 @@
  
  #include "FileDirectory.h"
  #include <shlobj.h>
 +#include <cwchar>
  
  #include "../Utility/ProcessHelper.h"
-+#include "../Rendering/OCATCrosshairShared.h"
  #include "../Utility/Constants.h"
- #include "../Logging/MessageLog.h"
- #include "../Utility/StringUtils.h"
-@@ -163,6 +165,26 @@ bool FileDirectory::FindBinaryDir()
+@@ -163,6 +164,22 @@ bool FileDirectory::FindBinaryDir()
          result = RegOpenKeyEx(HKEY_CURRENT_USER, L"SOFTWARE\\OCAT\\", 0, KEY_READ | KEY_WOW64_64KEY, &registryKey);
          if (result != ERROR_SUCCESS)
          {
 +          // RivaCross can use the renderer DLL without installing the OCAT frontend.
-+          HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, RIVACROSS_OCAT_MAPPING_NAME);
-+          if (mapping) {
-+            CloseHandle(mapping);
-+            HMODULE module = nullptr;
-+            if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++          HMODULE module = nullptr;
++          if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
 +                  GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 +                  reinterpret_cast<LPCWSTR>(&g_fileDirectory), &module)) {
-+              WCHAR modulePath[MAX_PATH];
-+              const DWORD length = GetModuleFileNameW(module, modulePath, MAX_PATH);
-+              if (length && length < MAX_PATH) {
-+                WCHAR* slash = std::wcsrchr(modulePath, L'\\');
-+                if (slash) {
-+                  slash[1] = L'\0';
-+                  directories_[DirectoryType::Bin] = Directory(modulePath);
-+                  return true;
-+                }
++            WCHAR modulePath[MAX_PATH];
++            const DWORD length = GetModuleFileNameW(module, modulePath, MAX_PATH);
++            if (length && length < MAX_PATH) {
++              WCHAR* slash = std::wcsrchr(modulePath, L'\\');
++              if (slash) {
++                slash[1] = L'\0';
++                directories_[DirectoryType::Bin] = Directory(modulePath);
++                return true;
 +              }
 +            }
 +          }
