@@ -62,9 +62,11 @@ reject direct EXE launch.
 
 For an already-running, unprotected D3D11 program, click **Attach running...**.
 The picker lists visible 64-bit processes that have loaded `d3d11.dll` and can
-be opened with the required process rights. Select one and look for `TEST` in
-its window. This list does not certify that the DLL can load or render. The
-injector's success report confirms only that remote `LoadLibraryW` returned a
+be opened with the required process rights. It also shows detected D3D12-only
+processes and processes whose module scan failed. These entries are labeled
+but cannot be attached. Select a D3D11 entry and look for `TEST` in its window.
+This list does not certify that the DLL can load or render. The injector's
+success report confirms only that remote `LoadLibraryW` returned a
 nonzero result; it does not prove that the crosshair rendered. Late attachment
 is currently implemented for D3D11 only. Keep RivaCrossOCAT open (it may be
 minimized) while playing. Closing the GUI hides the crosshair and releases the

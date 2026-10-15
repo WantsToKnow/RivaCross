@@ -310,6 +310,8 @@ static int runInjector(const wchar_t* dll, const wchar_t* injector, DWORD pid) {
 struct AttachCandidate {
 	DWORD pid;
 	wchar_t path[MAX_PATH];
+	enum { Ready, ModuleScanUnavailable, D3D12Only } state;
+	DWORD scanError;
 };
 
 static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
@@ -338,21 +340,30 @@ static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
 		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
 		if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH) break;
 	}
-	if (snapshot == INVALID_HANDLE_VALUE) return false;
-	MODULEENTRY32W module = {};
-	module.dwSize = sizeof(module);
-	bool d3d11 = false;
-	if (Module32FirstW(snapshot, &module)) do {
-		if (_wcsicmp(module.szModule, L"d3d11.dll") == 0) {
-			d3d11 = true;
-			break;
-		}
-	} while (Module32NextW(snapshot, &module));
-	CloseHandle(snapshot);
-	if (!d3d11) return false;
+	DWORD scanError = snapshot == INVALID_HANDLE_VALUE ? GetLastError() : 0;
 	candidate->pid = pid;
 	wcscpy(candidate->path, path);
-	return true;
+	if (snapshot == INVALID_HANDLE_VALUE) {
+		candidate->state = AttachCandidate::ModuleScanUnavailable;
+		candidate->scanError = scanError;
+		return true;
+	}
+	MODULEENTRY32W module = {};
+	module.dwSize = sizeof(module);
+	if (!Module32FirstW(snapshot, &module)) {
+		candidate->state = AttachCandidate::ModuleScanUnavailable;
+		candidate->scanError = GetLastError();
+		CloseHandle(snapshot);
+		return true;
+	}
+	bool d3d11 = false, d3d12 = false;
+	do {
+		if (_wcsicmp(module.szModule, L"d3d11.dll") == 0) d3d11 = true;
+		if (_wcsicmp(module.szModule, L"d3d12.dll") == 0) d3d12 = true;
+	} while (Module32NextW(snapshot, &module));
+	CloseHandle(snapshot);
+	candidate->state = d3d11 ? AttachCandidate::Ready : AttachCandidate::D3D12Only;
+	return d3d11 || d3d12;
 }
 
 enum { IdCandidateList = 600, IdRefreshCandidates };
@@ -381,12 +392,25 @@ static BOOL CALLBACK scanCandidateWindow(HWND window, LPARAM parameter) {
 	AttachCandidate candidate = {};
 	if (!inspectCandidate(pid, &candidate)) return TRUE;
 	picker.candidates[picker.count++] = candidate;
-	wchar_t label[MAX_PATH + 40];
+	wchar_t label[MAX_PATH + 100];
 	const wchar_t* slash = wcsrchr(candidate.path, L'\\');
-	swprintf(label, MAX_PATH + 40, L"%ls   PID %lu",
-		slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid);
+	if (candidate.state == AttachCandidate::ModuleScanUnavailable)
+		swprintf(label, MAX_PATH + 100,
+			L"%ls   PID %lu - module scan unavailable (error %lu)",
+			slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid,
+			(unsigned long)candidate.scanError);
+	else swprintf(label, MAX_PATH + 100, L"%ls   PID %lu%ls",
+		slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid,
+		candidate.state == AttachCandidate::D3D12Only ?
+		L" - D3D12 late attach unsupported" : L" - D3D11");
 	SendMessageW(picker.list, LB_ADDSTRING, 0, (LPARAM)label);
 	return TRUE;
+}
+
+static void updateAttachButton() {
+	int index = (int)SendMessageW(picker.list, LB_GETCURSEL, 0, 0);
+	EnableWindow(picker.attach, index >= 0 && index < picker.count &&
+		picker.candidates[index].state == AttachCandidate::Ready);
 }
 
 static void refreshCandidates() {
@@ -394,20 +418,25 @@ static void refreshCandidates() {
 	SendMessageW(picker.list, LB_RESETCONTENT, 0, 0);
 	CandidateScan scan = {};
 	EnumWindows(scanCandidateWindow, (LPARAM)&scan);
-	if (picker.count) SendMessageW(picker.list, LB_SETCURSEL, 0, 0);
-	EnableWindow(picker.attach, picker.count != 0);
+	if (picker.count) {
+		int selected = 0;
+		for (int i = 0; i < picker.count; ++i)
+			if (picker.candidates[i].state == AttachCandidate::Ready) { selected = i; break; }
+		SendMessageW(picker.list, LB_SETCURSEL, selected, 0);
+	}
+	updateAttachButton();
 	SetWindowTextW(picker.hint, picker.count ?
-		L"64-bit D3D11 candidates. CS2 excluded; display is not guaranteed." :
-		L"No D3D11 candidates. Start an app, then click Refresh.");
+		L"Visible 64-bit apps; only D3D11 entries can attach. CS2 excluded." :
+		L"No D3D11/D3D12 apps detected. Start an app, then click Refresh.");
 }
 
 static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM) {
 	if (message == WM_INITDIALOG) {
-		SetWindowTextW(window, L"Attach to running D3D11 application");
+		SetWindowTextW(window, L"Running applications");
 		RECT rect;
 		GetClientRect(window, &rect);
 		picker.hint = CreateWindowW(L"STATIC",
-			L"64-bit D3D11 candidates. CS2 is excluded. Display is not guaranteed.",
+			L"Visible 64-bit apps; only D3D11 entries can attach. CS2 excluded.",
 			WS_CHILD | WS_VISIBLE, 10, 9, rect.right - 20, 22,
 			window, NULL, GetModuleHandleW(NULL), NULL);
 		picker.list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
@@ -432,10 +461,15 @@ static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM
 	if (message == WM_COMMAND) {
 		if (LOWORD(key) == IDCANCEL) { EndDialog(window, 0); return TRUE; }
 		if (LOWORD(key) == IdRefreshCandidates) { refreshCandidates(); return TRUE; }
+		if (LOWORD(key) == IdCandidateList && HIWORD(key) == LBN_SELCHANGE) {
+			updateAttachButton(); return TRUE;
+		}
 		if (LOWORD(key) == IDOK ||
 			(LOWORD(key) == IdCandidateList && HIWORD(key) == LBN_DBLCLK)) {
 			int index = (int)SendMessageW(picker.list, LB_GETCURSEL, 0, 0);
-			if (index >= 0 && index < picker.count) EndDialog(window, index + 1);
+			if (index >= 0 && index < picker.count &&
+				picker.candidates[index].state == AttachCandidate::Ready)
+				EndDialog(window, index + 1);
 			return TRUE;
 		}
 	}
@@ -469,6 +503,7 @@ static void attachRunning() {
 	AttachCandidate current = {};
 	if (WaitForSingleObject(target, 0) != WAIT_TIMEOUT ||
 		!inspectCandidate(selected.pid, &current) ||
+		current.state != AttachCandidate::Ready ||
 		_wcsicmp(selected.path, current.path) != 0) {
 		CloseHandle(target);
 		status("Process changed or exited. Refresh the list and try again.");
