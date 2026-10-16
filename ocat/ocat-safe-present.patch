@@ -1,0 +1,84 @@
+diff --git a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+index 8707609..87663c1 100644
+--- a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+@@ -119,12 +119,16 @@ d3d12_renderer::~d3d12_renderer()
+ }
+ 
+ namespace {
+-void WaitForFence(ID3D12Fence* fence, UINT64 completionValue, HANDLE waitEvent)
++bool WaitForFence(ID3D12Fence* fence, UINT64 completionValue, HANDLE waitEvent)
+ {
+-  if (fence->GetCompletedValue() < completionValue) {
+-    fence->SetEventOnCompletion(completionValue, waitEvent);
+-    WaitForSingleObject(waitEvent, INFINITE);
+-  }
++  const UINT64 completed = fence->GetCompletedValue();
++  if (completed == UINT64_MAX) return false;
++  if (completed >= completionValue) return true;
++  if (!waitEvent || FAILED(fence->SetEventOnCompletion(completionValue, waitEvent)))
++    return false;
++  if (WaitForSingleObject(waitEvent, 5) != WAIT_OBJECT_0) return false;
++  const UINT64 afterWait = fence->GetCompletedValue();
++  return afterWait != UINT64_MAX && afterWait >= completionValue;
+ }
+ }  // namespace
+ 
+@@ -140,8 +144,11 @@ bool d3d12_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+     return false;
+   }
+ 
+-  WaitForFence(frameFences_[backBufferIndex].Get(), frameFenceValues_[backBufferIndex],
+-               frameFenceEvents_[backBufferIndex]);
++  // Skip this overlay frame if our GPU work is not yet complete.
++  if (!WaitForFence(frameFences_[backBufferIndex].Get(),
++                    frameFenceValues_[backBufferIndex],
++                    frameFenceEvents_[backBufferIndex]))
++    return false;
+ 
+   HRESULT hr = commandPool_[backBufferIndex]->Reset();
+ 
+@@ -282,7 +289,12 @@ bool d3d12_renderer::CreateFrameFences()
+       g_messageLog.LogError("D3D12", "Create Fence failed", hr);
+       return false;
+     }
+-    frameFenceEvents_.push_back(CreateEvent(nullptr, FALSE, FALSE, nullptr));
++    HANDLE event = CreateEvent(nullptr, FALSE, FALSE, nullptr);
++    if (!event) {
++      g_messageLog.LogError("D3D12", "Create Fence event failed", GetLastError());
++      return false;
++    }
++    frameFenceEvents_.push_back(event);
+     frameFenceValues_.push_back(0);
+   }
+   return true;
+@@ -706,7 +718,12 @@ void d3d12_renderer::DrawOverlay(int currentIndex, bool lagIndicatorState)
+   ID3D12CommandList* commandLists[] = {commandList_.Get()};
+   queue_->ExecuteCommandLists(1, commandLists);
+ 
+-  queue_->Signal(frameFences_[currentIndex].Get(), currFenceValue_);
++  hr = queue_->Signal(frameFences_[currentIndex].Get(), currFenceValue_);
++  if (FAILED(hr)) {
++    g_messageLog.LogError("D3D12", "DrawOverlay - Signal queue failed", hr);
++    initSuccessfull_ = false;
++    return;
++  }
+   frameFenceValues_[currentIndex] = currFenceValue_;
+   ++currFenceValue_;
+ }
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index 078443d..066f7e8 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -55,9 +55,10 @@ extern bool InstallLateD3D12Hook();
+ DWORD WINAPI InstallLateD3D11HookThread(LPVOID)
+ {
+   g_messageLog.LogInfo("dxgi", "Late hook worker started");
++  InstallLateD3D12Hook();
++  g_messageLog.LogInfo("dxgi", "Late D3D12 probe finished");
+   InstallLateD3D11Hook();
+   g_messageLog.LogInfo("dxgi", "Late D3D11 probe finished");
+-  InstallLateD3D12Hook();
+   g_messageLog.LogInfo("dxgi", "Late hook worker finished");
+   return 0;
+ }

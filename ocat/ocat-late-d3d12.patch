@@ -93,7 +93,7 @@ index 99bc54e..a507dcb 100644
  };
  }
 diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
-index bb4816b..1ac027a 100644
+index bb4816b..12ece37 100644
 --- a/GameOverlay/d3d/source/d3d/dxgi.cpp
 +++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
 @@ -30,9 +30,11 @@
@@ -108,7 +108,7 @@ index bb4816b..1ac027a 100644
  
  using namespace Microsoft::WRL;
  
-@@ -344,76 +346,231 @@ using Resize1Fn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain3 *, UINT, UINT, UI
+@@ -344,76 +346,261 @@ using Resize1Fn = HRESULT(STDMETHODCALLTYPE *)(IDXGISwapChain3 *, UINT, UINT, UI
  using ReleaseFn = ULONG(STDMETHODCALLTYPE *)(IDXGISwapChain *);
  
  // Intentionally process-lifetime: OCAT's DLL can be detached under the loader lock.
@@ -143,8 +143,7 @@ index bb4816b..1ac027a 100644
 +  static auto *unsafe = new std::unordered_set<IDXGISwapChain *>;
 +  return *unsafe;
 +}
- 
--std::unique_ptr<GameOverlay::d3d11_renderer> take_late_renderer(IDXGISwapChain *chain)
++
 +bool retire_late_renderer(IDXGISwapChain *chain, bool resizing)
 +{
 +  std::unique_ptr<LateRenderer> retired;
@@ -166,6 +165,13 @@ index bb4816b..1ac027a 100644
 +}
 +
 +void unblock_late_chain(IDXGISwapChain *chain)
++{
++  std::lock_guard<std::mutex> lock(late_mutex());
++  blocked_chains().erase(chain);
++}
+ 
+-std::unique_ptr<GameOverlay::d3d11_renderer> take_late_renderer(IDXGISwapChain *chain)
++void forget_late_chain(IDXGISwapChain *chain)
  {
    std::lock_guard<std::mutex> lock(late_mutex());
 -  auto &renderers = late_renderers();
@@ -175,18 +181,16 @@ index bb4816b..1ac027a 100644
 -  renderers.erase(it);
 -  return renderer;
 +  blocked_chains().erase(chain);
- }
-+
-+void forget_late_chain(IDXGISwapChain *chain)
-+{
-+  std::lock_guard<std::mutex> lock(late_mutex());
-+  blocked_chains().erase(chain);
 +  unsafe_chains().erase(chain);
-+}
+ }
  
 -void draw_late_d3d11(IDXGISwapChain *chain, UINT flags)
 +void draw_late_overlay(IDXGISwapChain *chain, UINT flags)
  {
++  static std::once_flag firstPresent;
++  std::call_once(firstPresent, [] {
++    g_messageLog.LogInfo("dxgi", "Late DXGI Present hook reached");
++  });
    if (g_ocatWrappedPresent || (flags & DXGI_PRESENT_TEST)) return;
 -  ComPtr<ID3D11Device> device;
 -  if (FAILED(chain->GetDevice(IID_PPV_ARGS(&device)))) return;
@@ -206,13 +210,24 @@ index bb4816b..1ac027a 100644
 +
 +  ComPtr<ID3D12Device> device12;
 +  if (FAILED(chain->GetDevice(IID_PPV_ARGS(&device12)))) return;
++  static std::once_flag firstD3D12Present;
++  std::call_once(firstD3D12Present, [] {
++    g_messageLog.LogInfo("dxgi", "Late D3D12 Present reached");
++  });
 +  ComPtr<IUnknown> identity;
 +  if (FAILED(device12.As(&identity))) return;
 +  ComPtr<ID3D12CommandQueue> queue;
 +  {
 +    std::lock_guard<std::mutex> lock(queue_mutex());
 +    const auto it = late_queues().find(identity.Get());
-+    if (it == late_queues().end() || it->second.ambiguous) return;
++    if (it == late_queues().end()) {
++      static std::once_flag firstMissingQueue;
++      std::call_once(firstMissingQueue, [] {
++        g_messageLog.LogInfo("dxgi", "Late D3D12 Present skipped: no direct queue observed for device");
++      });
++      return;
++    }
++    if (it->second.ambiguous) return;
 +    queue = it->second.queue;
 +  }
 +  ComPtr<IDXGISwapChain3> chain3;
@@ -221,14 +236,25 @@ index bb4816b..1ac027a 100644
 +  if (FAILED(chain3->GetDesc1(&desc)) ||
 +      !(desc.BufferUsage & DXGI_USAGE_RENDER_TARGET_OUTPUT)) return;
    std::lock_guard<std::mutex> lock(late_mutex());
-+  if (blocked_chains().count(chain) || unsafe_chains().count(chain)) return;
++  if (blocked_chains().count(chain) || unsafe_chains().count(chain)) {
++    static std::once_flag firstUnsafeChain;
++    std::call_once(firstUnsafeChain, [] {
++      g_messageLog.LogInfo("dxgi", "Late D3D12 Present skipped: swapchain state unsafe");
++    });
++    return;
++  }
    auto &renderer = late_renderers()[chain];
 -  if (!renderer) renderer = std::make_unique<GameOverlay::d3d11_renderer>(device.Get(), chain);
 -  if (!renderer->HideOverlay()) renderer->on_present();
 +  if (!renderer) renderer = std::make_unique<LateRenderer>();
-+  if (!renderer->d3d12)
++  if (!renderer->d3d12) {
++    static std::once_flag firstRendererAttempt;
++    std::call_once(firstRendererAttempt, [] {
++      g_messageLog.LogInfo("dxgi", "Late D3D12 renderer initialization attempted");
++    });
 +    renderer->d3d12 = std::make_unique<GameOverlay::d3d12_renderer>(
 +        queue.Get(), chain3.Get(), true);
++  }
 +  if (!renderer->d3d12->HideOverlay()) renderer->d3d12->on_present();
 +}
 +
@@ -237,6 +263,10 @@ index bb4816b..1ac027a 100644
 +{
 +  GameOverlay::find_hook_trampoline(&LateExecuteCommandLists)(queue, count, lists);
 +  if (queue->GetDesc().Type != D3D12_COMMAND_LIST_TYPE_DIRECT) return;
++  static std::once_flag firstDirectQueue;
++  std::call_once(firstDirectQueue, [] {
++    g_messageLog.LogInfo("dxgi", "Late D3D12 direct ExecuteCommandLists observed");
++  });
 +  ComPtr<ID3D12Device> device;
 +  ComPtr<IUnknown> identity;
 +  if (FAILED(queue->GetDevice(IID_PPV_ARGS(&device))) ||
@@ -365,7 +395,7 @@ index bb4816b..1ac027a 100644
    return count;
  }
  
-@@ -424,6 +581,59 @@ bool in_system_dxgi(void *function)
+@@ -424,6 +611,59 @@ bool in_system_dxgi(void *function)
        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
        reinterpret_cast<LPCWSTR>(function), &owner) && owner == GetModuleHandleW(L"dxgi.dll");
  }
@@ -425,7 +455,7 @@ index bb4816b..1ac027a 100644
  } // namespace
  
  // Called after DllMain returns. A temporary raw swapchain provides DXGI's shared vtable
-@@ -483,34 +693,8 @@ bool InstallLateD3D11Hook()
+@@ -483,34 +723,8 @@ bool InstallLateD3D11Hook()
      auto original = reinterpret_cast<CreateSwapChainFn>(VTABLE(factory.Get())[10]);
      if (original == &IDXGIFactory_CreateSwapChain)
        original = GameOverlay::find_hook_trampoline(&IDXGIFactory_CreateSwapChain);
@@ -462,7 +492,7 @@ index bb4816b..1ac027a 100644
    }
    chain.Reset(); factory.Reset(); context.Reset(); device.Reset();
    if (window) DestroyWindow(window);
-@@ -519,3 +703,70 @@ bool InstallLateD3D11Hook()
+@@ -519,3 +733,116 @@ bool InstallLateD3D11Hook()
                                       "Late D3D11 hooks unavailable");
    return success;
  }
@@ -472,10 +502,16 @@ index bb4816b..1ac027a 100644
 +// device to the swapchain before drawing.
 +bool InstallLateD3D12Hook()
 +{
-+  if (!GetModuleHandleW(L"d3d12.dll")) return false;
++  g_messageLog.LogInfo("dxgi", "Late D3D12 probe started");
++  if (!GetModuleHandleW(L"d3d12.dll")) {
++    g_messageLog.LogInfo("dxgi", "Late D3D12 skipped: runtime not loaded");
++    return false;
++  }
++  g_messageLog.LogInfo("dxgi", "Late D3D12 loading runtime");
 +  const HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
 +  const HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
 +  if (!d3d12 || !dxgi) {
++    g_messageLog.LogWarning("dxgi", "Late D3D12 runtime or DXGI unavailable");
 +    if (d3d12) FreeLibrary(d3d12);
 +    return false;
 +  }
@@ -486,7 +522,11 @@ index bb4816b..1ac027a 100644
 +      GetProcAddress(d3d12, "D3D12CreateDevice"));
 +  const auto createFactory = reinterpret_cast<CreateFactoryFn>(
 +      GetProcAddress(dxgi, "CreateDXGIFactory1"));
-+  if (!createDevice || !createFactory) { FreeLibrary(d3d12); return false; }
++  if (!createDevice || !createFactory) {
++    g_messageLog.LogWarning("dxgi", "Late D3D12 required export unavailable");
++    FreeLibrary(d3d12);
++    return false;
++  }
 +
 +  ComPtr<ID3D12Device> device;
 +  ComPtr<ID3D12CommandQueue> queue;
@@ -495,36 +535,72 @@ index bb4816b..1ac027a 100644
 +  HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 16, 16,
 +                                nullptr, nullptr, nullptr, nullptr);
 +  bool success = false;
-+  if (window && SUCCEEDED(createDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
-+                                       IID_PPV_ARGS(&device)))) {
++  do {
++    if (!window) {
++      g_messageLog.LogError("dxgi", "Late D3D12 temporary window failed", GetLastError());
++      break;
++    }
++    g_messageLog.LogInfo("dxgi", "Late D3D12 creating temporary device");
++    HRESULT hr = createDevice(nullptr, D3D_FEATURE_LEVEL_11_0,
++                              IID_PPV_ARGS(&device));
++    if (FAILED(hr)) {
++      g_messageLog.LogError("dxgi", "Late D3D12 temporary device failed", hr);
++      break;
++    }
 +    D3D12_COMMAND_QUEUE_DESC queueDesc{};
 +    queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
-+    if (SUCCEEDED(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue))) &&
-+        SUCCEEDED(createFactory(IID_PPV_ARGS(&factory)))) {
-+      DXGI_SWAP_CHAIN_DESC desc{};
-+      desc.BufferDesc.Width = 16;
-+      desc.BufferDesc.Height = 16;
-+      desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
-+      desc.SampleDesc.Count = 1;
-+      desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-+      desc.BufferCount = 2;
-+      desc.OutputWindow = window;
-+      desc.Windowed = TRUE;
-+      desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
-+      using CreateSwapChainFn = HRESULT(STDMETHODCALLTYPE *)(IDXGIFactory *, IUnknown *,
-+          DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
-+      auto original = reinterpret_cast<CreateSwapChainFn>(VTABLE(factory.Get())[10]);
-+      if (original == &IDXGIFactory_CreateSwapChain)
-+        original = GameOverlay::find_hook_trampoline(&IDXGIFactory_CreateSwapChain);
-+      if (original && SUCCEEDED(original(factory.Get(), queue.Get(), &desc, &chain))) {
-+        void *execute = VTABLE(queue.Get())[10];
-+        if (execute && install_late_swapchain_hooks(chain.Get(), true)) {
-+          success = GameOverlay::install_hook(execute,
-+              reinterpret_cast<GameOverlay::hook::address>(&LateExecuteCommandLists));
-+        }
-+      }
++    g_messageLog.LogInfo("dxgi", "Late D3D12 creating temporary queue");
++    hr = device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue));
++    if (FAILED(hr)) {
++      g_messageLog.LogError("dxgi", "Late D3D12 temporary queue failed", hr);
++      break;
 +    }
-+  }
++    g_messageLog.LogInfo("dxgi", "Late D3D12 creating DXGI factory");
++    hr = createFactory(IID_PPV_ARGS(&factory));
++    if (FAILED(hr)) {
++      g_messageLog.LogError("dxgi", "Late D3D12 DXGI factory failed", hr);
++      break;
++    }
++    DXGI_SWAP_CHAIN_DESC desc{};
++    desc.BufferDesc.Width = 16;
++    desc.BufferDesc.Height = 16;
++    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    desc.SampleDesc.Count = 1;
++    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++    desc.BufferCount = 2;
++    desc.OutputWindow = window;
++    desc.Windowed = TRUE;
++    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++    using CreateSwapChainFn = HRESULT(STDMETHODCALLTYPE *)(IDXGIFactory *, IUnknown *,
++        DXGI_SWAP_CHAIN_DESC *, IDXGISwapChain **);
++    auto original = reinterpret_cast<CreateSwapChainFn>(VTABLE(factory.Get())[10]);
++    if (original == &IDXGIFactory_CreateSwapChain)
++      original = GameOverlay::find_hook_trampoline(&IDXGIFactory_CreateSwapChain);
++    if (!original) {
++      g_messageLog.LogWarning("dxgi", "Late D3D12 CreateSwapChain target unavailable");
++      break;
++    }
++    g_messageLog.LogInfo("dxgi", "Late D3D12 creating temporary swapchain");
++    hr = original(factory.Get(), queue.Get(), &desc, &chain);
++    if (FAILED(hr)) {
++      g_messageLog.LogError("dxgi", "Late D3D12 temporary swapchain failed", hr);
++      break;
++    }
++    void *execute = VTABLE(queue.Get())[10];
++    if (!execute) {
++      g_messageLog.LogWarning("dxgi", "Late D3D12 ExecuteCommandLists target unavailable");
++      break;
++    }
++    g_messageLog.LogInfo("dxgi", "Late D3D12 installing swapchain hooks");
++    if (!install_late_swapchain_hooks(chain.Get(), true)) {
++      g_messageLog.LogWarning("dxgi", "Late D3D12 swapchain hooks unavailable");
++      break;
++    }
++    g_messageLog.LogInfo("dxgi", "Late D3D12 installing queue hook");
++    success = GameOverlay::install_hook(execute,
++        reinterpret_cast<GameOverlay::hook::address>(&LateExecuteCommandLists));
++    if (!success) g_messageLog.LogWarning("dxgi", "Late D3D12 queue hook unavailable");
++  } while (false);
 +
 +  chain.Reset(); factory.Reset(); queue.Reset(); device.Reset();
 +  if (window) DestroyWindow(window);
@@ -534,10 +610,10 @@ index bb4816b..1ac027a 100644
 +  return success;
 +}
 diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
-index 1ffa223..5b31e25 100644
+index 1ffa223..7a3bd6d 100644
 --- a/GameOverlay/d3d/source/main.cpp
 +++ b/GameOverlay/d3d/source/main.cpp
-@@ -50,10 +50,12 @@ std::wstring g_dllDirectory;
+@@ -50,10 +50,15 @@ std::wstring g_dllDirectory;
  DenyList g_denyList;
  bool g_uwpApp = false;
  extern bool InstallLateD3D11Hook();
@@ -545,8 +621,23 @@ index 1ffa223..5b31e25 100644
  
  DWORD WINAPI InstallLateD3D11HookThread(LPVOID)
  {
++  g_messageLog.LogInfo("dxgi", "Late hook worker started");
    InstallLateD3D11Hook();
++  g_messageLog.LogInfo("dxgi", "Late D3D11 probe finished");
 +  InstallLateD3D12Hook();
++  g_messageLog.LogInfo("dxgi", "Late hook worker finished");
    return 0;
  }
  
+@@ -164,9 +169,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
+ 
+         // Existing swapchains cannot be replaced by the factory creation hook.
+         // A worker avoids creating a D3D device while the loader lock is held.
++        g_messageLog.LogInfo("dxgi", "Starting late hook worker");
+         HANDLE lateHookThread = CreateThread(nullptr, 0, InstallLateD3D11HookThread,
+                                              nullptr, 0, nullptr);
+         if (lateHookThread) CloseHandle(lateHookThread);
++        else g_messageLog.LogError("dxgi", "Late hook worker could not start", GetLastError());
+ 
+       }
+       else

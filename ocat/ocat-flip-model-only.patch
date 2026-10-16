@@ -1,0 +1,85 @@
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index 12ece37..325320f 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -42,17 +42,25 @@ extern thread_local bool g_ocatWrappedPresent;
+ 
+ #define WRAP_DXGI 0
+ 
++// Draw only into a flip-model game back buffer. This checks eligibility, not
++// whether Windows actually used Independent Flip for a particular frame.
++bool flip_model_render_target(IDXGISwapChain *chain)
++{
++  DXGI_SWAP_CHAIN_DESC desc{};
++  return SUCCEEDED(chain->GetDesc(&desc)) &&
++      (desc.BufferUsage & DXGI_USAGE_RENDER_TARGET_OUTPUT) &&
++      (desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD ||
++       desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL);
++}
++
+ template <typename T>
+ void hook_swapchain_object(IUnknown *device, T **swapchainTarget)
+ { 
+   g_messageLog.LogInfo("dxgi", "hook_swapchain_object");
+   T *const swapchain = *swapchainTarget;
+ 
+-  DXGI_SWAP_CHAIN_DESC desc;
+-  swapchain->GetDesc(&desc);
+-
+-  if ((desc.BufferUsage & DXGI_USAGE_RENDER_TARGET_OUTPUT) == 0) {
+-    g_messageLog.LogWarning("dxgi", "no DXGI_USAGE_RENDER_TARGET_OUTPUT");
++  if (!flip_model_render_target(swapchain)) {
++    g_messageLog.LogInfo("dxgi", "Skipping non-flip or non-render-target swapchain");
+     return;
+   }
+ 
+@@ -415,7 +423,8 @@ void draw_late_overlay(IDXGISwapChain *chain, UINT flags)
+   std::call_once(firstPresent, [] {
+     g_messageLog.LogInfo("dxgi", "Late DXGI Present hook reached");
+   });
+-  if (g_ocatWrappedPresent || (flags & DXGI_PRESENT_TEST)) return;
++  if (g_ocatWrappedPresent || (flags & DXGI_PRESENT_TEST) ||
++      !flip_model_render_target(chain)) return;
+ 
+   ComPtr<ID3D11Device> device11;
+   if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device11)))) {
+diff --git a/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp b/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
+index 4b8f682..68e8e1e 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi_swapchain.cpp
+@@ -281,7 +281,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::GetDevice(REFIID riid, void **ppDevice)
+ HRESULT STDMETHODCALLTYPE DXGISwapChain::Present(UINT SyncInterval, UINT Flags)
+ {
+   // skip presents that are discarded
+-  if (Flags != DXGI_PRESENT_TEST) {
++  if (!(Flags & DXGI_PRESENT_TEST)) {
+     switch (d3dVersion_) {
+       case D3DVersion_11:
+         if (d3d11Renderer_) {
+@@ -311,7 +311,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::Present(UINT SyncInterval, UINT Flags)
+   HRESULT result = swapChain_->Present(SyncInterval, Flags);
+   g_ocatWrappedPresent = wasWrapped;
+ 
+-  if (Flags != DXGI_PRESENT_TEST) {
++  if (!(Flags & DXGI_PRESENT_TEST)) {
+     mutex_.lock();
+     switch (d3dVersion_) {
+       case D3DVersion_11:
+@@ -413,7 +413,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::Present1(UINT SyncInterval, UINT Presen
+                                                   const DXGI_PRESENT_PARAMETERS *pPresentParameters)
+ {
+   // skip presents that are discarded
+-  if (PresentFlags != DXGI_PRESENT_TEST) {
++  if (!(PresentFlags & DXGI_PRESENT_TEST)) {
+     switch (d3dVersion_) {
+       case D3DVersion_11:
+         if (d3d11Renderer_) {
+@@ -444,7 +444,7 @@ HRESULT STDMETHODCALLTYPE DXGISwapChain::Present1(UINT SyncInterval, UINT Presen
+                        ->Present1(SyncInterval, PresentFlags, pPresentParameters);
+   g_ocatWrappedPresent = wasWrapped;
+ 
+-  if (PresentFlags != DXGI_PRESENT_TEST) {
++  if (!(PresentFlags & DXGI_PRESENT_TEST)) {
+     mutex_.lock();
+     switch (d3dVersion_) {
+       case D3DVersion_11:

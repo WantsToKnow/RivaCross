@@ -54,7 +54,7 @@ Optional OCAT build
 `RivaCrossOCAT.exe` publishes the same presets and hotkey visibility to a named
 shared-memory block for a compatible, modified OCAT game overlay. It does not
 use RTSS. Stock OCAT does not read this block or draw the custom crosshair.
-With `ocat/bin/gameoverlay64.dll` and `ocat/bin/DLLInjector64.exe` beside the
+With `ocat/bin/gameoverlay64-flip.dll` and `ocat/bin/DLLInjector64.exe` beside the
 GUI, click **Launch game...** and select a 64-bit game executable. The GUI
 starts it suspended, asks OCAT's injector to load the modified overlay, then
 resumes it even if injection fails. Games that require their own launcher may
@@ -71,6 +71,24 @@ confirms only that remote `LoadLibraryW` returned a nonzero result; it does not
 prove that the crosshair rendered. The late D3D12 renderer stops drawing when it
 observes multiple direct queues for one device or a `ResizeBuffers1` call that
 supplies Present queues, because it cannot then identify the right queue.
+The bundled renderer does not automatically inject into child processes; only
+the PID you select is targeted. Injection and renderer diagnostics are written
+under `Documents\OCAT\Logs` in `PresentMonLog.txt` and `GameOverlayLog.txt`.
+The GUI limits each injector attempt to 8 seconds. In a local D3D12 test,
+RTSS's loaded `RTSSHooks64.dll` prevented OCAT's late Present hook from running;
+the same test initialized OCAT rendering after RTSS was closed. The running-app
+picker labels D3D12 processes that have the RTSS hook module loaded, including
+apps that also load D3D11. This indicates a possible conflict, not proof that
+RTSS hooked that swapchain; **Try attach** remains available. If rendering fails,
+exit RTSS and restart the target app to unload its RTSS hook. An injector timeout
+leaves the remote load result unknown; the DLL may still load later.
+It draws into the game's own flip-model swapchain, without a separate crosshair
+window. That avoids adding desktop content over the game, but does not prove
+that Windows kept Independent Flip. Compare per-frame `PresentMode` before and
+after enabling the crosshair; treat any deviation from your required mode as
+a failed compatibility check. This measures past frames and cannot guarantee
+zero mode changes. A display's built-in crosshair is outside the Windows
+composition path.
 Anti-cheat-protected games may block attachment or penalize injected third-party
 software; this project does not certify account safety. Keep RivaCrossOCAT open
 (it may be minimized) while playing. Closing the GUI hides the crosshair and

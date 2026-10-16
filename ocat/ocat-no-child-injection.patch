@@ -1,0 +1,13 @@
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -148,9 +148,4 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
+         SendDllStateMessage(OverlayMessageType::AttachDll);
+ 
+-        g_messageLog.LogInfo("GameOverlay", "Install process hooks");
+-        if (!GameOverlay::InstallCreateProcessHook()) {
+-          g_messageLog.LogError("GameOverlay", "Failed to install process hooks");
+-        }
+-        
+         // DXGI
+         wchar_t system_path_buffer[MAX_PATH];

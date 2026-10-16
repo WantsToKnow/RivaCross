@@ -1,0 +1,101 @@
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index 325320f..af818d5 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -700,12 +700,16 @@ bool InstallLateD3D11Hook()
+   using CreateDeviceFn = HRESULT(WINAPI *)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE,
+       UINT, const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **,
+       D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+-  using CreateFactoryFn = HRESULT(WINAPI *)(REFIID, void **);
+   const auto createDevice = reinterpret_cast<CreateDeviceFn>(
+       GetProcAddress(d3d11, "D3D11CreateDevice"));
+-  const auto createFactory = reinterpret_cast<CreateFactoryFn>(
+-      GetProcAddress(dxgi, "CreateDXGIFactory1"));
+-  if (!createDevice || !createFactory) { FreeLibrary(d3d11); return false; }
++  // The export is detoured by OCAT; entering its wrapper here can re-enter
++  // hook installation while the late probe is constructing a swapchain.
++  const auto createFactory = GameOverlay::find_hook_trampoline(&CreateDXGIFactory1);
++  if (!createDevice || !createFactory) {
++    g_messageLog.LogWarning("dxgi", "Late D3D11 probe skipped: original factory unavailable");
++    FreeLibrary(d3d11);
++    return false;
++  }
+ 
+   ComPtr<ID3D11Device> device;
+   ComPtr<ID3D11DeviceContext> context;
+@@ -762,14 +766,10 @@ bool InstallLateD3D12Hook()
+     return false;
+   }
+ 
+-  using CreateDeviceFn = HRESULT(WINAPI *)(IUnknown *, D3D_FEATURE_LEVEL, REFIID, void **);
+-  using CreateFactoryFn = HRESULT(WINAPI *)(REFIID, void **);
+-  const auto createDevice = reinterpret_cast<CreateDeviceFn>(
+-      GetProcAddress(d3d12, "D3D12CreateDevice"));
+-  const auto createFactory = reinterpret_cast<CreateFactoryFn>(
+-      GetProcAddress(dxgi, "CreateDXGIFactory1"));
++  const auto createDevice = GameOverlay::find_hook_trampoline(&D3D12CreateDevice);
++  const auto createFactory = GameOverlay::find_hook_trampoline(&CreateDXGIFactory1);
+   if (!createDevice || !createFactory) {
+-    g_messageLog.LogWarning("dxgi", "Late D3D12 required export unavailable");
++    g_messageLog.LogWarning("dxgi", "Late D3D12 probe skipped: original entry point unavailable");
+     FreeLibrary(d3d12);
+     return false;
+   }
+diff --git a/GameOverlay/d3d/source/hook.cpp b/GameOverlay/d3d/source/hook.cpp
+index c0322f1..43743dd 100644
+--- a/GameOverlay/d3d/source/hook.cpp
++++ b/GameOverlay/d3d/source/hook.cpp
+@@ -87,18 +87,22 @@ hook::status hook::install()
+     MH_Initialize();
+   }
+ 
++  trampoline = nullptr;
+   const MH_STATUS statuscode = MH_CreateHook(target, replacement, &trampoline);
+   g_messageLog.LogVerbose("hook::install", "Status: " + std::string(MH_StatusToString(statuscode)));
+-  if (statuscode == MH_OK || statuscode == MH_ERROR_ALREADY_CREATED) {
+-    enable();
++  if (statuscode == MH_OK && trampoline && trampoline != target) {
+     return status::success;
+   }
+ 
++  // An existing hook does not provide this caller's original trampoline.
++  if (statuscode == MH_OK) MH_RemoveHook(target);
++  trampoline = nullptr;
++
+   if (--s_reference_count == 0) {
+     MH_Uninitialize();
+   }
+ 
+-  return static_cast<status>(statuscode);
++  return statuscode == MH_OK ? status::unknown : static_cast<status>(statuscode);
+ }
+ hook::status hook::uninstall()
+ {
+diff --git a/GameOverlay/d3d/source/hook_manager.cpp b/GameOverlay/d3d/source/hook_manager.cpp
+index 6e4bab1..a6b7873 100644
+--- a/GameOverlay/d3d/source/hook_manager.cpp
++++ b/GameOverlay/d3d/source/hook_manager.cpp
+@@ -123,6 +123,7 @@ namespace GameOverlay {
+     {
+       hook hook(target, replacement);
+       hook.trampoline = target;
++      const critical_section::lock lock(s_cs);
+ 
+       hook::status status = hook::status::unknown;
+ 
+@@ -154,9 +155,13 @@ namespace GameOverlay {
+         return false;
+       }
+ 
+-      const critical_section::lock lock(s_cs);
+-
+       s_hooks.emplace_back(std::move(hook), method);
++      // Publish the original entry point before another thread can enter the detour.
++      if (method == hook_method::function_hook && !s_hooks.back().first.enable()) {
++        s_hooks.back().first.uninstall();
++        s_hooks.pop_back();
++        return false;
++      }
+ 
+       g_messageLog.LogVerbose("install_hook", "Successfully installed hook");
+       return true;

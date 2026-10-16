@@ -6,3 +6,4 @@ RivaCrossConsole.exe
 # lib/*.a
 # lib/*.dll
 # lib/*.exp
+ocat/bin/gameoverlay64.dll

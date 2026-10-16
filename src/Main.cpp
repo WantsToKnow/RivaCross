@@ -274,7 +274,7 @@ static bool prepareOcat(wchar_t dll[MAX_PATH], wchar_t injector[MAX_PATH]) {
 		status("OCAT bridge unavailable. Close another RivaCrossOCAT.");
 		return false;
 	}
-	if (!besideExe(dll, L"ocat\\bin\\gameoverlay64.dll") ||
+	if (!besideExe(dll, L"ocat\\bin\\gameoverlay64-flip.dll") ||
 		!besideExe(injector, L"ocat\\bin\\DLLInjector64.exe") ||
 		!regularFile(dll) || !regularFile(injector)) {
 		status("OCAT files missing beside RivaCrossOCAT.exe.");
@@ -283,7 +283,8 @@ static bool prepareOcat(wchar_t dll[MAX_PATH], wchar_t injector[MAX_PATH]) {
 	return true;
 }
 
-// 1: helper reported success, 0: timeout, -1: failure. Rendering is not verified.
+// 1: helper reported success, 0: timeout, 2: access denied, -1: other failure.
+// Rendering is not verified.
 static int runInjector(const wchar_t* dll, const wchar_t* injector, DWORD pid) {
 	wchar_t command[MAX_PATH * 2 + 64];
 	if (swprintf(command, MAX_PATH * 2 + 64, L"\"%ls\" -l \"%ls\" -p %lu",
@@ -293,15 +294,16 @@ static int runInjector(const wchar_t* dll, const wchar_t* injector, DWORD pid) {
 	PROCESS_INFORMATION helper = {};
 	if (!CreateProcessW(injector, command, NULL, NULL, FALSE,
 		CREATE_NO_WINDOW, NULL, NULL, &startup, &helper)) return -1;
-	DWORD wait = WaitForSingleObject(helper.hProcess, 15000);
+	DWORD wait = WaitForSingleObject(helper.hProcess, 8000);
 	if (wait == WAIT_TIMEOUT) {
 		TerminateProcess(helper.hProcess, 1);
-		WaitForSingleObject(helper.hProcess, 5000);
+		WaitForSingleObject(helper.hProcess, 1000);
 	}
 	DWORD exitCode = 0;
-	int result = wait == WAIT_TIMEOUT ? 0 :
-		wait == WAIT_OBJECT_0 && GetExitCodeProcess(helper.hProcess, &exitCode) &&
-		exitCode == 1 ? 1 : -1;
+	int result = -1;
+	if (wait == WAIT_TIMEOUT) result = 0;
+	else if (wait == WAIT_OBJECT_0 && GetExitCodeProcess(helper.hProcess, &exitCode))
+		result = exitCode == 1 ? 1 : exitCode == 2 ? 2 : -1;
 	CloseHandle(helper.hThread);
 	CloseHandle(helper.hProcess);
 	return result;
@@ -312,6 +314,7 @@ struct AttachCandidate {
 	wchar_t path[MAX_PATH];
 	enum { Ready, ModuleScanUnavailable, D3D12Only } state;
 	DWORD scanError;
+	bool d3d12, rtssHook;
 };
 
 static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
@@ -357,11 +360,15 @@ static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
 		return true;
 	}
 	bool d3d11 = false, d3d12 = false;
+	candidate->rtssHook = false;
 	do {
 		if (_wcsicmp(module.szModule, L"d3d11.dll") == 0) d3d11 = true;
 		if (_wcsicmp(module.szModule, L"d3d12.dll") == 0) d3d12 = true;
+		if (_wcsicmp(module.szModule, L"RTSSHooks64.dll") == 0)
+			candidate->rtssHook = true;
 	} while (Module32NextW(snapshot, &module));
 	CloseHandle(snapshot);
+	candidate->d3d12 = d3d12;
 	candidate->state = d3d11 ? AttachCandidate::Ready : AttachCandidate::D3D12Only;
 	return d3d11 || d3d12;
 }
@@ -401,8 +408,10 @@ static BOOL CALLBACK scanCandidateWindow(HWND window, LPARAM parameter) {
 			(unsigned long)candidate.scanError);
 	else swprintf(label, MAX_PATH + 100, L"%ls   PID %lu%ls",
 		slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid,
+		candidate.d3d12 && candidate.rtssHook ?
+			L" - D3D12 loaded; RTSS hook present" :
 		candidate.state == AttachCandidate::D3D12Only ?
-		L" - D3D12 (experimental attach)" : L" - D3D11");
+			L" - D3D12 (experimental attach)" : L" - D3D11");
 	SendMessageW(picker.list, LB_ADDSTRING, 0, (LPARAM)label);
 	return TRUE;
 }
@@ -412,7 +421,8 @@ static void updateAttachButton() {
 	bool selected = index >= 0 && index < picker.count;
 	EnableWindow(picker.attach, selected);
 	SetWindowTextW(picker.attach, selected &&
-		picker.candidates[index].state != AttachCandidate::Ready ?
+		(picker.candidates[index].state != AttachCandidate::Ready ||
+			(picker.candidates[index].d3d12 && picker.candidates[index].rtssHook)) ?
 		L"Try attach" : L"Attach selected");
 }
 
@@ -519,9 +529,13 @@ static void attachRunning() {
 	}
 	int result = runInjector(dll, injector, selected.pid);
 	CloseHandle(target);
-	status(result == 1 ? "Injector reported success; check the game for TEST." :
-		result == 0 ? "OCAT injector timed out." :
-		"OCAT injection failed or the process denied access.");
+	status(result == 1 ?
+		(current.d3d12 && current.rtssHook ?
+			"DLL loaded; RTSS hook present. Rendering/flip unverified." :
+			"DLL loaded; rendering and flip mode unverified.") :
+		result == 0 ? "Injector timed out; DLL may still load later." :
+		result == 2 ? "Access denied by target process (error 5); DLL was not loaded." :
+		"OCAT injection failed; see injector log.");
 }
 
 static void launchGame() {
@@ -575,8 +589,9 @@ static void launchGame() {
 	CloseHandle(target.hThread);
 	CloseHandle(target.hProcess);
 	status(resumed == (DWORD)-1 ? "Could not resume the selected game." :
-		injection == 1 ? "Game resumed; injector reported success. Check game." :
-		injection == 0 ? "Game resumed; OCAT injector timed out." :
+		injection == 1 ? "Game resumed; rendering and flip mode unverified." :
+		injection == 0 ? "Injector timed out; DLL may still load later." :
+		injection == 2 ? "Access denied by target process (error 5); DLL was not loaded." :
 		"Game resumed; OCAT injection failed.");
 }
 #endif
