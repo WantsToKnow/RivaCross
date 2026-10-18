@@ -1,0 +1,20 @@
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -232,10 +232,13 @@ DWORD WINAPI InitializeRivaCrossRenderer(LPVOID)
+   SendDllStateMessage(OverlayMessageType::AttachDll);
+   wchar_t systemPath[MAX_PATH];
+   if (!GetSystemDirectoryW(systemPath, MAX_PATH)) return 0;
+-  // Creation hooks cover future devices. The probes cover a device/swapchain
+-  // created while this worker was starting; no GPU work runs in a CBT callback.
++  // Startup watching captures the game's real factory and command queue.
++  // Avoid creating a temporary D3D12 device inside the target process.
+   GameOverlay::register_module(std::wstring(systemPath) + L"\\dxgi.dll");
+   GameOverlay::register_additional_module(L"d3d12.dll");
+-  InstallLateD3D11HookThread(nullptr);
++  if (watchView->mode != OCATWatchLaunch)
++    InstallLateD3D11HookThread(nullptr);
++  else
++    g_messageLog.LogInfo("dxgi", "Startup watcher using creation hooks; late device probe skipped");
+   return 0;
+ }

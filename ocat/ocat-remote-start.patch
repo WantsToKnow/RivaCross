@@ -1,0 +1,261 @@
+diff --git a/DLLInjector/DLLInjection.cpp b/DLLInjector/DLLInjection.cpp
+--- a/DLLInjector/DLLInjection.cpp
++++ b/DLLInjector/DLLInjection.cpp
+@@ -23,6 +23,7 @@
+ #include "DLLInjection.h"
+ 
+ #include <windows.h>
++#include <cstdint>
+ #include <string>
+ #include <tlhelp32.h>
+ 
+@@ -75,6 +76,7 @@
+ 
+ bool DLLInjection::InjectDLL()
+ {
++  deadline_ = GetTickCount64() + 7000;
+   if (arguments_.dllPath.empty()) {
+     g_messageLog.LogError("DLLInjector", 
+       "Empty dll path");
+@@ -89,13 +91,22 @@
+     return false;
+   }
+ 
+-  if (!GetRemoteDLLAddress()) {
+-    return false;
+-  }
+-
+-  if (!ExecuteLoadLibrary()) {
+-    return false;
+-  }
++  // A desktop hook may already have mapped this DLL without starting its
++  // renderer. Loading the same path again would not call DllMain a second time.
++  void* dllModule = GetRemoteDLLModule(true);
++  if (!dllModule) {
++    if (!GetRemoteDLLAddress() || !ExecuteLoadLibrary()) return false;
++    dllModule = GetRemoteDLLModule();
++  }
++  if (!dllModule) {
++    // Some protected processes allow LoadLibrary yet deny module snapshots.
++    // The DLL is loaded, but its x64 base cannot be taken from the truncated
++    // thread exit code; leave the renderer state to the status protocol.
++    g_messageLog.LogWarning("DLLInjector",
++      "DLL loaded; renderer start unconfirmed because module base is unavailable");
++    return true;
++  }
++  if (!ExecuteStartRemoteRenderer(dllModule)) return false;
+ 
+   g_messageLog.LogInfo("DLLInjector",
+                    "DLL injected into process " + GetProcessInfo());
+@@ -104,6 +115,7 @@
+ 
+ bool DLLInjection::FreeDLL()
+ {
++  deadline_ = GetTickCount64() + 7000;
+   g_messageLog.LogInfo("DLLInjector",
+     "Starting free dll for " + std::to_string(arguments_.processID));
+ 
+@@ -189,44 +201,44 @@
+   return ExecuteRemoteThread("LoadLibraryW", resources_.remoteDLLAddress);
+ }
+ 
+-void* DLLInjection::GetRemoteDLLModule()
+-{
+-  bool result = false;
++void* DLLInjection::GetRemoteDLLModule(bool quietMissing)
++{
+   void* dllModule = nullptr;
+   Win32Handle snapShot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, arguments_.processID);
+-  if (snapShot.Get())
++  if (snapShot.Get() != INVALID_HANDLE_VALUE)
+   {
+     MODULEENTRY32 moduleEntry{};
+     moduleEntry.dwSize = sizeof(moduleEntry);
+     auto newModule = Module32First(snapShot.Get(), &moduleEntry);
+     while (newModule)
+     {
+-      if (arguments_.dllName.compare(moduleEntry.szModule) == 0)
++      if (_wcsicmp(arguments_.dllPath.c_str(), moduleEntry.szExePath) == 0)
+       {
+         dllModule = moduleEntry.modBaseAddr;
++        remoteDLLSize_ = moduleEntry.modBaseSize;
+         g_messageLog.LogInfo("DLLInjector",
+           "Found remote DLL module for "
+           + GetProcessInfo());
+ 
+-        result = true;
+         break;
+       }
+ 
+       newModule = Module32Next(snapShot.Get(), &moduleEntry);
+     }
+-    if (!newModule)
++    if (!newModule && !quietMissing)
+     {
+       g_messageLog.LogError("DLLInjector", 
+         "Module not found for " + GetProcessInfo(), GetLastError());
+-      result = false;
+     }
+   }
+   else
+   {
+-    g_messageLog.LogError("DLLInjector", 
+-      "CreateToolhelp32Snapshot failed for " + GetProcessInfo(),
+-      GetLastError());
+-    result = false;
++    const DWORD error = GetLastError();
++    if (!quietMissing) {
++      accessDenied_ = error == ERROR_ACCESS_DENIED;
++      g_messageLog.LogError("DLLInjector",
++        "CreateToolhelp32Snapshot failed for " + GetProcessInfo(), error);
++    }
+   }
+   return dllModule;
+ }
+@@ -234,6 +246,33 @@
+ bool DLLInjection::ExecuteFreeLibrary(void* dllModule)
+ {
+   return ExecuteRemoteThread("FreeLibrary", dllModule);
++}
++
++bool DLLInjection::ExecuteStartRemoteRenderer(void* dllModule)
++{
++  // Resolve the export locally, then apply its RVA to the same image in the
++  // target. DONT_RESOLVE_DLL_REFERENCES reads exports without running OCAT code.
++  HMODULE local = LoadLibraryExW(arguments_.dllPath.c_str(), NULL,
++                                 DONT_RESOLVE_DLL_REFERENCES);
++  if (!local) {
++    g_messageLog.LogError("DLLInjector", "Could not read local OCAT exports", GetLastError());
++    return false;
++  }
++  FARPROC exportAddress = GetProcAddress(local, "StartRemoteRenderer");
++  const uintptr_t offset = exportAddress ?
++    reinterpret_cast<uintptr_t>(exportAddress) - reinterpret_cast<uintptr_t>(local) : 0;
++  FreeLibrary(local);
++  if (!exportAddress) {
++    g_messageLog.LogError("DLLInjector", "StartRemoteRenderer export missing");
++    return false;
++  }
++  if (offset >= remoteDLLSize_) {
++    g_messageLog.LogError("DLLInjector", "Remote OCAT image does not match local export");
++    return false;
++  }
++  const auto remote = reinterpret_cast<PTHREAD_START_ROUTINE>(
++    reinterpret_cast<uintptr_t>(dllModule) + offset);
++  return ExecuteRemoteThread(remote, NULL);
+ }
+ 
+ bool DLLInjection::ExecuteRemoteThread(const std::string& functionName, void* functionArguments)
+@@ -246,6 +285,11 @@
+     return false;
+   }
+ 
++  return ExecuteRemoteThread(threadRoutine, functionArguments);
++}
++
++bool DLLInjection::ExecuteRemoteThread(PTHREAD_START_ROUTINE threadRoutine, void* functionArguments)
++{
+   Win32Handle remoteThread = CreateRemoteThread(resources_.processHandle, NULL, 0, threadRoutine,
+     functionArguments, 0, NULL);
+   if (!remoteThread.Get()) {
+@@ -256,9 +300,17 @@
+     return false;
+   }
+ 
+-  if (WaitForSingleObject(remoteThread.Get(), INFINITE) != WAIT_OBJECT_0) {
+-    g_messageLog.LogError("DLLInjector", "WaitForSingleObject failed ",
+-      GetLastError());
++  const ULONGLONG now = GetTickCount64();
++  const DWORD remaining = deadline_ > now ?
++    static_cast<DWORD>(deadline_ - now) : 0;
++  const DWORD waited = WaitForSingleObject(remoteThread.Get(), remaining);
++  if (waited != WAIT_OBJECT_0) {
++    // The target thread may still be reading its path after a timeout.
++    // Retain that tiny target allocation rather than freeing it underneath.
++    if (waited == WAIT_TIMEOUT) resources_.remoteDLLAddress = nullptr;
++    g_messageLog.LogError("DLLInjector", waited == WAIT_TIMEOUT ?
++      "Remote thread timed out" : "WaitForSingleObject failed",
++      waited == WAIT_TIMEOUT ? ERROR_TIMEOUT : GetLastError());
+     return false;
+   }
+   DWORD exitCode = 0;
+diff --git a/DLLInjector/DLLInjection.h b/DLLInjector/DLLInjection.h
+--- a/DLLInjector/DLLInjection.h
++++ b/DLLInjector/DLLInjection.h
+@@ -54,13 +54,17 @@
+   bool GetProcessHandle();
+   bool GetRemoteDLLAddress();
+   bool ExecuteLoadLibrary();
+-  void* GetRemoteDLLModule();
++  void* GetRemoteDLLModule(bool quietMissing = false);
+   bool ExecuteFreeLibrary(void* dllModule);
++  bool ExecuteStartRemoteRenderer(void* dllModule);
+   bool ExecuteRemoteThread(const std::string& functionName, void* functionArguments);
++  bool ExecuteRemoteThread(PTHREAD_START_ROUTINE threadRoutine, void* functionArguments);
+ 
+   Arguments arguments_;
+   Resources resources_;
+   std::string processName_;
+   size_t dllPathSize_ = 0;
++  DWORD remoteDLLSize_ = 0;
++  ULONGLONG deadline_ = 0;
+   bool accessDenied_ = false;
+ };
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -54,7 +54,7 @@
+ bool g_uwpApp = false;
+ extern bool InstallLateD3D11Hook();
+ extern bool InstallLateD3D12Hook();
+-void StartRivaCrossRenderer();
++bool StartRivaCrossRenderer();
+ 
+ namespace {
+ INIT_ONCE watchOnce = INIT_ONCE_STATIC_INIT;
+@@ -240,27 +240,30 @@
+   return 0;
+ }
+ 
+-void StartRivaCrossRenderer()
+-{
+-  if (!RivaCrossWatchAllowed() ||
+-      InterlockedCompareExchange(&rendererStarted, 1, 0) != 0) return;
++bool StartRivaCrossRenderer()
++{
++  if (!RivaCrossWatchAllowed()) return false;
++  if (InterlockedCompareExchange(&rendererStarted, 1, 0) != 0) return true;
+   // Retain code before queuing a worker. Unhooking must not unload its entry.
+   HMODULE pinned = nullptr;
+   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+       GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&GlobalHookProc), &pinned)) {
+     InterlockedExchange(&rendererStarted, 0);
+-    return;
+-  }
+-  UpdateRivaCrossStatus(1);
++    return false;
++  }
+   HANDLE worker = CreateThread(nullptr, 0, InitializeRivaCrossRenderer, nullptr, 0, nullptr);
+-  if (worker) CloseHandle(worker);
+-  else InterlockedExchange(&rendererStarted, 0);
+-}
+-
+-DWORD WINAPI StartRemoteRenderer(LPVOID)
+-{
+-  StartRivaCrossRenderer();
+-  return 0;
++  if (worker) {
++    UpdateRivaCrossStatus(1);
++    CloseHandle(worker);
++    return true;
++  }
++  InterlockedExchange(&rendererStarted, 0);
++  return false;
++}
++
++extern "C" __declspec(dllexport) DWORD WINAPI StartRemoteRenderer(LPVOID)
++{
++  return StartRivaCrossRenderer() ? 1 : 0;
+ }
+ 
+ BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)

@@ -11,10 +11,13 @@ all: RivaCross.exe
 RivaCross.exe: $(GUI_OBJS)
 	$(LINK) /NOLOGO $(GUI_OBJS) /OUT:$@ /SUBSYSTEM:WINDOWS /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS)
 
-ocat: RivaCrossOCAT.exe
+ocat: RivaCrossOCAT.exe ocat\bin\RivaCrossOCATHook64.dll
 
-RivaCrossOCAT.exe: $(OCAT_OBJS)
-	$(LINK) /NOLOGO $(OCAT_OBJS) /OUT:$@ /SUBSYSTEM:WINDOWS /MANIFESTUAC:level='asInvoker' $(WIN_LIBS)
+ocat\bin\RivaCrossOCATHook64.dll: src\OCATHook.cpp src\OCATWatchShared.h src\OCATStatus.h
+	$(CXX) /nologo /utf-8 /MT /O1 /GS /GR- /LD /Foobj\OCATHook.obj src\OCATHook.cpp /link /OUT:$@ /IMPLIB:obj\OCATHook.lib /OPT:REF /OPT:ICF kernel32.lib user32.lib
+
+RivaCrossOCAT.exe: $(OCAT_OBJS) Makefile
+	$(LINK) /NOLOGO $(OCAT_OBJS) /OUT:$@ /SUBSYSTEM:WINDOWS /MANIFEST:EMBED /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS)
 
 console: RivaCrossConsole.exe
 
@@ -24,10 +27,10 @@ RivaCrossConsole.exe: $(CONSOLE_OBJS)
 obj\GuiMain.obj: src\Main.cpp src\RivaCross.h src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\Main.cpp
 
-obj\OCATMain.obj: src\Main.cpp src\RivaCross.h src\RTSShared.h src\OCATShared.h src\OCATCrosshairShared.h
+obj\OCATMain.obj: src\Main.cpp src\RivaCross.h src\RTSShared.h src\OCATShared.h src\OCATCrosshairShared.h src\OCATStatus.h src\OCATWatchShared.h src\OCATProbeShared.h
 	$(CXX) $(CXXFLAGS) /DRIVACROSS_OCAT /c /Fo$@ src\Main.cpp
 
-obj\OCATShared.obj: src\OCATShared.cpp src\OCATShared.h src\RTSShared.h src\OCATCrosshairShared.h
+obj\OCATShared.obj: src\OCATShared.cpp src\OCATShared.h src\RTSShared.h src\OCATCrosshairShared.h src\OCATStatus.h src\OCATWatchShared.h src\OCATProbeShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\OCATShared.cpp
 
 obj\ConsoleMain.obj: src\ConsoleMain.cpp src\RivaCross.h src\RTSShared.h

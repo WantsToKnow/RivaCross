@@ -1,0 +1,196 @@
+diff --git a/GameOverlay/d3d/source/OCATStatus.h b/GameOverlay/d3d/source/OCATStatus.h
+new file mode 100644
+index 0000000..092fc69
+--- /dev/null
++++ b/GameOverlay/d3d/source/OCATStatus.h
+@@ -0,0 +1,16 @@
++#pragma once
++
++#include <windows.h>
++
++// Per-process renderer progress, read by RivaCrossOCAT.exe.
++#define RIVACROSS_OCAT_STATUS_MAGIC 0x53544352u
++#define RIVACROSS_OCAT_STATUS_VERSION 1u
++
++struct OCATStatusShared {
++  DWORD magic;
++  DWORD version;
++  volatile LONG stage; // 1: DLL code ran, 2: Present reached, 3: draw commands issued
++  DWORD api;            // 0: unknown, 11: D3D11, 12: D3D12
++};
++
++void UpdateRivaCrossStatus(LONG stage, DWORD api = 0);
+diff --git a/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
+index a376913..0d9cc5f 100644
+--- a/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
+@@ -24,6 +24,7 @@
+ // OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #include "d3d11_renderer.hpp"
++#include "../OCATStatus.h"
+ #include <assert.h>
+ #include <vector>
+ 
+@@ -172,6 +173,7 @@ bool d3d11_renderer::on_present(bool lagIndicatorState) { return on_present(0, l
+ 
+ bool d3d11_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+ {
++  UpdateRivaCrossStatus(2, 11);
+   if (status == InitializationStatus::UNINITIALIZED) {
+     return false;
+   }
+@@ -209,6 +211,7 @@ bool d3d11_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+   switch (status) {
+     case InitializationStatus::DEFERRED_CONTEXT_INITIALIZED: {
+       context_->ExecuteCommandList(overlayCommandList_[backBufferIndex].Get(), true);
++      UpdateRivaCrossStatus(3, 11);
+       return true;
+     }
+     case InitializationStatus::IMMEDIATE_CONTEXT_INITIALIZED: {
+@@ -293,6 +296,7 @@ bool d3d11_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+       context_->OMSetBlendState(pBlendState.Get(), blendFactor, sampleMask);
+       context_->RSSetState(rasterizerState.Get());
+       context_->RSSetViewports(numViewports, viewports.data());
++      UpdateRivaCrossStatus(3, 11);
+       return true;
+     }
+   }
+diff --git a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+index 87663c1..02e1735 100644
+--- a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+@@ -24,6 +24,7 @@
+ // OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ #include "d3d12_renderer.hpp"
++#include "../OCATStatus.h"
+ #include <assert.h>
+ #include "../deps/d3dx12/d3dx12.h"
+ 
+@@ -140,6 +141,7 @@ bool d3d12_renderer::on_present(bool lagIndicatorState)
+ 
+ bool d3d12_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+ {
++  UpdateRivaCrossStatus(2, 12);
+   if (!initSuccessfull_) {
+     return false;
+   }
+@@ -164,7 +166,7 @@ bool d3d12_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+   }
+ 
+   DrawOverlay(backBufferIndex, lagIndicatorState);
+-
++  if (!initSuccessfull_) return false;
+   return true;
+ }
+ 
+@@ -726,6 +728,7 @@ void d3d12_renderer::DrawOverlay(int currentIndex, bool lagIndicatorState)
+   }
+   frameFenceValues_[currentIndex] = currFenceValue_;
+   ++currFenceValue_;
++  UpdateRivaCrossStatus(3, 12);
+ }
+ 
+ bool d3d12_renderer::WaitForIdle()
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index af818d5..fd0a379 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -31,6 +31,7 @@
+ #include "DXGIWrapper.h"
+ #include "d3d11_renderer.hpp"
+ #include "d3d12_renderer.hpp"
++#include "../OCATStatus.h"
+ #include <cwchar>
+ #include <mutex>
+ #include <unordered_map>
+@@ -423,8 +424,9 @@ void draw_late_overlay(IDXGISwapChain *chain, UINT flags)
+   std::call_once(firstPresent, [] {
+     g_messageLog.LogInfo("dxgi", "Late DXGI Present hook reached");
+   });
+-  if (g_ocatWrappedPresent || (flags & DXGI_PRESENT_TEST) ||
+-      !flip_model_render_target(chain)) return;
++  if (g_ocatWrappedPresent || (flags & DXGI_PRESENT_TEST)) return;
++  UpdateRivaCrossStatus(2);
++  if (!flip_model_render_target(chain)) return;
+ 
+   ComPtr<ID3D11Device> device11;
+   if (SUCCEEDED(chain->GetDevice(IID_PPV_ARGS(&device11)))) {
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index 066f7e8..557277b 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -35,9 +35,11 @@
+ #include "Overlay/OverlayMessage.h"
+ #include "Overlay/VK_Environment.h"
+ #include "Utility/StringUtils.h"
++#include "OCATStatus.h"
+ 
+ #include <psapi.h>
+ #include <assert.h>
++#include <stdio.h>
+ 
+ #pragma data_seg("SHARED")
+ HWND sharedFrontendWindow = NULL;
+@@ -52,8 +54,52 @@ bool g_uwpApp = false;
+ extern bool InstallLateD3D11Hook();
+ extern bool InstallLateD3D12Hook();
+ 
++namespace {
++// Process lifetime: in-flight Present callbacks may outlive hook removal.
++INIT_ONCE statusOnce = INIT_ONCE_STATIC_INIT;
++SRWLOCK statusLock = SRWLOCK_INIT;
++HANDLE statusMapping = nullptr;
++OCATStatusShared* statusView = nullptr;
++
++BOOL CALLBACK InitStatus(PINIT_ONCE, PVOID, PVOID*)
++{
++  wchar_t name[80];
++  swprintf_s(name, L"Local\\RivaCrossOCATStatusV1-%lu", GetCurrentProcessId());
++  statusMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
++                                    0, sizeof(OCATStatusShared), name);
++  if (!statusMapping) return FALSE;
++  statusView = static_cast<OCATStatusShared*>(MapViewOfFile(
++      statusMapping, FILE_MAP_WRITE, 0, 0, sizeof(OCATStatusShared)));
++  if (!statusView) {
++    CloseHandle(statusMapping);
++    statusMapping = nullptr;
++    return FALSE;
++  }
++  statusView->magic = RIVACROSS_OCAT_STATUS_MAGIC;
++  statusView->version = RIVACROSS_OCAT_STATUS_VERSION;
++  statusView->api = 0;
++  InterlockedExchange(&statusView->stage, 1);
++  return TRUE;
++}
++}
++
++void UpdateRivaCrossStatus(LONG stage, DWORD api)
++{
++  if (!InitOnceExecuteOnce(&statusOnce, InitStatus, nullptr, nullptr)) return;
++  if (stage < statusView->stage ||
++      (stage == statusView->stage && (!api || api == statusView->api))) return;
++  AcquireSRWLockExclusive(&statusLock);
++  if (stage >= statusView->stage) {
++    if (api) statusView->api = api;
++    MemoryBarrier();
++    InterlockedExchange(&statusView->stage, stage);
++  }
++  ReleaseSRWLockExclusive(&statusLock);
++}
++
+ DWORD WINAPI InstallLateD3D11HookThread(LPVOID)
+ {
++  UpdateRivaCrossStatus(1);
+   g_messageLog.LogInfo("dxgi", "Late hook worker started");
+   InstallLateD3D12Hook();
+   g_messageLog.LogInfo("dxgi", "Late D3D12 probe finished");
+@@ -66,6 +112,7 @@ DWORD WINAPI InstallLateD3D11HookThread(LPVOID)
+ extern "C" __declspec(dllexport) LRESULT CALLBACK
+ GlobalHookProc(int code, WPARAM wParam, LPARAM lParam)
+ {
++  UpdateRivaCrossStatus(1);
+   return CallNextHookEx(NULL, code, wParam, lParam);
+ }
+ 

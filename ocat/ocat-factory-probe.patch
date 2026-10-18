@@ -1,0 +1,63 @@
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index 236e98e..7d1b4f0 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -253,6 +253,34 @@ void hook_factory_object(T **factoryTarget)
+   }
+ }
+ 
++// Prime the shared DXGI factory methods before the game creates a swapchain.
++// This creates no D3D device, command queue, or swapchain in the game process.
++void InstallEarlyFactoryHooks()
++{
++  HMODULE dxgi = GetModuleHandleW(L"dxgi.dll");
++  const bool loadedHere = dxgi == nullptr;
++  if (loadedHere) dxgi = LoadLibraryW(L"dxgi.dll");
++  if (!dxgi) {
++    g_messageLog.LogWarning("dxgi", "Startup DXGI factory probe: runtime unavailable");
++    return;
++  }
++
++  const auto createFactory = GameOverlay::find_hook_trampoline(&CreateDXGIFactory1);
++  if (createFactory) {
++    ComPtr<IDXGIFactory2> factory;
++    const HRESULT hr = createFactory(IID_PPV_ARGS(&factory));
++    if (SUCCEEDED(hr)) {
++      hook_factory_object(factory.GetAddressOf());
++      g_messageLog.LogInfo("dxgi", "Startup DXGI factory method probe finished");
++    } else {
++      g_messageLog.LogWarning("dxgi", "Startup DXGI factory creation failed", hr);
++    }
++  } else {
++    g_messageLog.LogWarning("dxgi", "Startup DXGI factory trampoline unavailable");
++  }
++  if (loadedHere) FreeLibrary(dxgi);
++}
++
+ EXTERN_C HRESULT WINAPI CreateDXGIFactory(REFIID riid, void **ppFactory)
+ {
+   g_messageLog.LogInfo("dxgi", "CreateDXGIFactory");
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index bb40c05..793a6b8 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -54,6 +54,7 @@ DenyList g_denyList;
+ bool g_uwpApp = false;
+ extern bool InstallLateD3D11Hook();
+ extern bool InstallLateD3D12Hook();
++extern void InstallEarlyFactoryHooks();
+ bool StartRivaCrossRenderer();
+ 
+ namespace {
+@@ -238,8 +239,10 @@ DWORD WINAPI InitializeRivaCrossRenderer(LPVOID)
+   GameOverlay::register_additional_module(L"d3d12.dll");
+   if (watchView->mode != OCATWatchLaunch)
+     InstallLateD3D11HookThread(nullptr);
+-  else
++  else {
++    InstallEarlyFactoryHooks();
+     g_messageLog.LogInfo("dxgi", "Startup watcher using creation hooks; late device probe skipped");
++  }
+   return 0;
+ }
+ 

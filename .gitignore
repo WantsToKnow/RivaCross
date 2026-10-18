@@ -7,3 +7,5 @@ RivaCrossConsole.exe
 # lib/*.dll
 # lib/*.exp
 ocat/bin/gameoverlay64.dll
+ocat/bin/*.in-use-*.dll
+config/ocat-watch.ini

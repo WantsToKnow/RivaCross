@@ -16,8 +16,9 @@
 enum ControlId {
 	IdCrosshair = 101, IdX, IdY, IdScale, IdColor, IdMode,
 	IdHotkey, IdMaster, IdLoad, IdSaveAs, IdApply, IdVisible,
-	IdClipboard, IdKeep, IdStatus, IdLaunch, IdAttach,
-	IdNudgeUp, IdNudgeDown, IdNudgeLeft, IdNudgeRight
+	IdClipboard, IdKeep, IdStatus, IdLaunch, IdAttach, IdAttachWindow,
+	IdNudgeUp, IdNudgeDown, IdNudgeLeft, IdNudgeRight, IdWatch, IdStopWatch,
+	IdSecondaryHotkey
 };
 
 #ifndef RIVACROSS_OCAT
@@ -26,8 +27,29 @@ static const char* const OsdEntry = "RivaCross_crosshair";
 
 struct AppState {
 	HWND window, crosshair, x, y, scale, color, mode;
-	HWND hotkey, master, visibleButton, keep, status;
+	HWND hotkey, secondaryHotkey, master, visibleButton, keep, status;
 	HWND pixelOffset;
+#ifdef RIVACROSS_OCAT
+	HWND renderStatus;
+	HWND stopWatch;
+	wchar_t watchPath[MAX_PATH];
+	ULONGLONG lastWatchPoll;
+	FILETIME watchArmedAt;
+	HHOOK cbtHook;
+	HHOOK windowHook;
+	HMODULE cbtModule;
+	HANDLE trackedProcess;
+	DWORD trackedPid;
+	int injectorResult;
+	LONG confirmedStage;
+	DWORD confirmedApi;
+	DWORD statusReadError;
+	LONG callbackSeen;
+	DWORD authorizationError, startError;
+	ULONGLONG trackedSince, lastStatusPoll;
+	bool noReplyYet;
+	bool targetStopped, targetStateUnknown, mappingLost;
+#endif
 	HWND captureTarget;
 	HFONT font;
 	WNDPROC buttonProc;
@@ -67,8 +89,35 @@ static void refreshHotkeys() {
 	char name[96];
 	formatKey(app.hotkeyState.keyCode, app.hotkeyState.modifierMask, name, sizeof(name));
 	SetWindowTextA(app.hotkey, name);
+	formatKey(app.hotkeyState.secondaryKeyCode, app.hotkeyState.secondaryModifierMask, name, sizeof(name));
+	SetWindowTextA(app.secondaryHotkey, name);
 	formatKey(app.hotkeyState.masterKeyCode, app.hotkeyState.masterModifierMask, name, sizeof(name));
 	SetWindowTextA(app.master, name);
+}
+
+static bool crosshairVisible() {
+	return app.hotkeyState.masterEnabled && app.hotkeyState.visible;
+}
+
+static bool keyDown(int key, int modifiers) {
+	if (!key || !(GetAsyncKeyState(key) & 0x8000)) return false;
+	if ((modifiers & 1) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return false;
+	if ((modifiers & 2) && !(GetAsyncKeyState(VK_SHIFT) & 0x8000)) return false;
+	if ((modifiers & 4) && !(GetAsyncKeyState(VK_MENU) & 0x8000)) return false;
+	return true;
+}
+
+static void setMasterEnabled(bool enabled) {
+	app.hotkeyState.masterEnabled = enabled;
+	if (enabled) app.hotkeyState.visible = app.hotkeyState.mode == HotkeyHold ?
+		keyDown(app.hotkeyState.keyCode, app.hotkeyState.modifierMask) ||
+		keyDown(app.hotkeyState.secondaryKeyCode, app.hotkeyState.secondaryModifierMask) : true;
+}
+
+static void refreshVisibility() {
+	EnableWindow(app.visibleButton, app.hotkeyState.masterEnabled);
+	SetWindowTextA(app.visibleButton, !app.hotkeyState.masterEnabled ? "Master off" :
+		app.hotkeyState.visible ? "Hide" : "Show");
 }
 
 static void refreshControls() {
@@ -94,7 +143,7 @@ static void refreshControls() {
 	SetWindowTextA(app.color, text);
 	SendMessageA(app.mode, CB_SETCURSEL, app.hotkeyState.mode, 0);
 	refreshHotkeys();
-	SetWindowTextA(app.visibleButton, app.hotkeyState.visible ? "Hide" : "Show");
+	refreshVisibility();
 }
 
 static bool parseNumber(HWND field, int* value) {
@@ -148,7 +197,7 @@ static bool readControls() {
 	next.position[1] = y;
 	next.scale = (unsigned int)scale;
 	int mode = (int)SendMessageA(app.mode, CB_GETCURSEL, 0, 0);
-	if (mode != HotkeyNone && !app.hotkeyState.keyCode) {
+	if (mode != HotkeyNone && !app.hotkeyState.keyCode && !app.hotkeyState.secondaryKeyCode) {
 		MessageBoxA(app.window, "Click the hotkey field and press a key, or disable the hotkey mode.",
 			"Hotkey missing", MB_OK | MB_ICONWARNING);
 		return false;
@@ -160,9 +209,9 @@ static bool readControls() {
 
 static int sendOverlay() {
 #ifdef RIVACROSS_OCAT
-	return OCATSharedUpdate(&app.config, app.hotkeyState.visible) ? 0 : -1;
+	return OCATSharedUpdate(&app.config, crosshairVisible()) ? 0 : -1;
 #else
-	return RTSSUpdateOSDVisibility(&app.config, OsdEntry, app.hotkeyState.visible);
+	return RTSSUpdateOSDVisibility(&app.config, OsdEntry, crosshairVisible());
 #endif
 }
 
@@ -215,7 +264,7 @@ static void loadPreset() {
 	RTSSCrossConfig config = app.config;
 	HotkeyState hotkey = {};
 	hotkey.visible = true;
-	hotkey.masterEnabled = true;
+	hotkey.masterEnabled = app.hotkeyState.masterEnabled;
 	if (loadConfig(path, &config, &hotkey) != 0) {
 		MessageBoxA(app.window, "The preset file is missing or invalid.", "Load failed",
 			MB_OK | MB_ICONWARNING);
@@ -224,7 +273,6 @@ static void loadPreset() {
 	app.config = config;
 	app.hotkeyState = hotkey;
 	app.hotkeyState.visible = true;
-	app.hotkeyState.masterEnabled = true;
 	app.hotkeyState.prevAsyncState = false;
 	app.hotkeyState.masterPrevAsyncState = false;
 	strcpy(app.configPath, path);
@@ -264,20 +312,59 @@ static bool regularFile(const wchar_t* path) {
 		!(attributes & FILE_ATTRIBUTE_DIRECTORY);
 }
 
+static bool loadOcatHookModule() {
+	if (app.cbtModule) return true;
+	wchar_t path[MAX_PATH];
+	if (!besideExe(path, L"ocat\\bin\\RivaCrossOCATHook64.dll")) return false;
+	app.cbtModule = LoadLibraryW(path);
+	return app.cbtModule != NULL;
+}
+
 static bool isCs2(const wchar_t* path) {
 	const wchar_t* slash = wcsrchr(path, L'\\');
 	return _wcsicmp(slash ? slash + 1 : path, L"cs2.exe") == 0;
 }
 
+static bool prepareOcatProbe() {
+	if (OCATProbeReady()) return true;
+	if (!OCATProbeOpen()) return false;
+	wchar_t executable[MAX_PATH], command[MAX_PATH + 80];
+	if (!GetModuleFileNameW(NULL, executable, MAX_PATH) ||
+		swprintf(command, MAX_PATH + 80, L"\"%ls\" --ocat-probe %lu",
+			executable, (unsigned long)GetCurrentProcessId()) < 0) return false;
+	STARTUPINFOW startup = {};
+	startup.cb = sizeof(startup);
+	PROCESS_INFORMATION child = {};
+	if (!CreateProcessW(executable, command, NULL, NULL, FALSE,
+		CREATE_NO_WINDOW, NULL, NULL, &startup, &child)) return false;
+	ULONGLONG deadline = GetTickCount64() + 7000;
+	DWORD waited;
+	do {
+		OCATWatchHeartbeat();
+		waited = WaitForSingleObject(child.hProcess, 100);
+	} while (waited == WAIT_TIMEOUT && GetTickCount64() < deadline);
+	if (waited != WAIT_OBJECT_0) {
+		TerminateProcess(child.hProcess, 124);
+		WaitForSingleObject(child.hProcess, 500);
+	}
+	CloseHandle(child.hThread);
+	CloseHandle(child.hProcess);
+	return waited == WAIT_OBJECT_0 && OCATProbeReady();
+}
+
 static bool prepareOcat(wchar_t dll[MAX_PATH], wchar_t injector[MAX_PATH]) {
-	if (!OCATSharedOpen() || !OCATSharedUpdate(&app.config, app.hotkeyState.visible)) {
+	if (!OCATSharedOpen() || !OCATSharedUpdate(&app.config, crosshairVisible())) {
 		status("OCAT bridge unavailable. Close another RivaCrossOCAT.");
 		return false;
 	}
-	if (!besideExe(dll, L"ocat\\bin\\gameoverlay64-flip.dll") ||
-		!besideExe(injector, L"ocat\\bin\\DLLInjector64.exe") ||
-		!regularFile(dll) || !regularFile(injector)) {
+	if (!besideExe(dll, L"ocat\\bin\\gameoverlay64-flip.dll") || !regularFile(dll) ||
+		(injector && (!besideExe(injector, L"ocat\\bin\\DLLInjector64.exe") ||
+			!regularFile(injector)))) {
 		status("OCAT files missing beside RivaCrossOCAT.exe.");
+		return false;
+	}
+	if (!prepareOcatProbe()) {
+		status("Graphics address probe failed or exceeded 7 seconds.");
 		return false;
 	}
 	return true;
@@ -294,7 +381,12 @@ static int runInjector(const wchar_t* dll, const wchar_t* injector, DWORD pid) {
 	PROCESS_INFORMATION helper = {};
 	if (!CreateProcessW(injector, command, NULL, NULL, FALSE,
 		CREATE_NO_WINDOW, NULL, NULL, &startup, &helper)) return -1;
-	DWORD wait = WaitForSingleObject(helper.hProcess, 8000);
+	DWORD wait;
+	ULONGLONG deadline = GetTickCount64() + 8000;
+	do {
+		OCATWatchHeartbeat();
+		wait = WaitForSingleObject(helper.hProcess, 100);
+	} while (wait == WAIT_TIMEOUT && GetTickCount64() < deadline);
 	if (wait == WAIT_TIMEOUT) {
 		TerminateProcess(helper.hProcess, 1);
 		WaitForSingleObject(helper.hProcess, 1000);
@@ -309,22 +401,343 @@ static int runInjector(const wchar_t* dll, const wchar_t* injector, DWORD pid) {
 	return result;
 }
 
+enum { OcatHookInstalled = 3 }; // Hook installation does not confirm target DLL load.
+
+static void showOcatStatus() {
+	if (!app.trackedPid) return;
+	const char* hidden = !app.hotkeyState.masterEnabled ? " Crosshair master OFF." :
+		app.hotkeyState.visible ? "" : " Crosshair hidden (Show).";
+	if (app.targetStopped || app.mappingLost) {
+		char message[160];
+		snprintf(message, sizeof(message), "PID %lu: %s; renderer confirmation cleared.%s",
+			(unsigned long)app.trackedPid, app.targetStopped ?
+				(app.targetStateUnknown ? "target state unavailable" : "target exited") :
+				(app.statusReadError == ERROR_ACCESS_DENIED ?
+					"status access denied" : "status mapping disappeared"), hidden);
+		SetWindowTextA(app.renderStatus, message);
+		return;
+	}
+	const char* api = app.confirmedApi == 11 ? "D3D11" :
+		app.confirmedApi == 12 ? "D3D12" : "API unknown";
+	char message[160];
+	if (app.confirmedStage == 3)
+		snprintf(message, sizeof(message),
+			"PID %lu: %s draw commands issued; screen visibility unverified.%s",
+			(unsigned long)app.trackedPid, api, hidden);
+	else if (app.confirmedStage == 2)
+		snprintf(message, sizeof(message),
+			"PID %lu: %s DXGI Present hook reached; render call unverified.%s",
+			(unsigned long)app.trackedPid, api, hidden);
+	else if (app.confirmedStage == 1)
+		snprintf(message, sizeof(message),
+			"PID %lu: DLL code ran; waiting for DXGI Present hook.%s",
+			(unsigned long)app.trackedPid, hidden);
+	else if (app.startError)
+		snprintf(message, sizeof(message), "PID %lu: DLL ran; renderer start failed (error %lu).",
+			(unsigned long)app.trackedPid, (unsigned long)app.startError);
+	else if (app.callbackSeen) {
+		const char* reason = app.authorizationError == ERROR_NOT_FOUND ? "EXE/PID differs" :
+			app.authorizationError == ERROR_TIMEOUT ? "controller heartbeat expired" :
+			app.authorizationError == ERROR_ACCESS_DENIED ? "control access denied" :
+			app.authorizationError == ERROR_BUSY ? "control update in progress" :
+			app.authorizationError ? "control unavailable" : "renderer start pending";
+		snprintf(message, sizeof(message), "PID %lu: DLL callback ran; %s (error %lu).",
+			(unsigned long)app.trackedPid, reason, (unsigned long)app.authorizationError);
+	} else {
+		const char* pending = app.statusReadError == ERROR_ACCESS_DENIED ?
+			"Status access denied; DLL state unknown" :
+			app.injectorResult == OcatHookInstalled ?
+				"Hook armed; target DLL load not confirmed" :
+			app.injectorResult == 1 ?
+			"DLL load reported; renderer has not replied" :
+			app.injectorResult == 0 ?
+			"Injector timed out; DLL load unknown" :
+			app.injectorResult == 2 ?
+			"Access denied; DLL not loaded by this attempt" :
+			"Injection failed; renderer has not replied";
+		snprintf(message, sizeof(message), "PID %lu: %s.%s%s",
+			(unsigned long)app.trackedPid, pending,
+			app.noReplyYet ? " No renderer acknowledgement after 8 seconds." : "",
+			hidden);
+	}
+	SetWindowTextA(app.renderStatus, message);
+}
+
+static void pollOcatStatus() {
+	if (!app.trackedPid || app.targetStopped) return;
+	ULONGLONG now = GetTickCount64();
+	if (now - app.lastStatusPoll < 250) return;
+	app.lastStatusPoll = now;
+	DWORD processWait = app.trackedProcess ? WaitForSingleObject(app.trackedProcess, 0) : WAIT_FAILED;
+	if (processWait != WAIT_TIMEOUT) {
+		if (app.trackedProcess) CloseHandle(app.trackedProcess);
+		app.trackedProcess = NULL;
+		app.confirmedStage = 0;
+		app.confirmedApi = 0;
+		app.targetStopped = true;
+		app.targetStateUnknown = processWait != WAIT_OBJECT_0;
+		showOcatStatus();
+		return;
+	}
+	LONG stage = 0;
+	DWORD api = 0;
+	DWORD readError = 0;
+	OCATStatus details = {};
+	bool changed = false;
+	bool hasStatus = OCATSharedReadStatus(app.trackedPid, &stage, &api, &readError, &details);
+	if (app.statusReadError != readError) {
+		app.statusReadError = readError;
+		changed = true;
+	}
+	if (hasStatus) {
+		if (app.callbackSeen != details.callbackSeen ||
+			app.authorizationError != details.authorizationError || app.startError != details.startError) {
+			app.callbackSeen = details.callbackSeen;
+			app.authorizationError = details.authorizationError;
+			app.startError = details.startError;
+			changed = true;
+		}
+		if (app.mappingLost) {
+			app.mappingLost = false;
+			changed = true;
+		}
+		if (stage > app.confirmedStage) {
+			app.confirmedStage = stage;
+			changed = true;
+		}
+		if (api && api != app.confirmedApi) {
+			app.confirmedApi = api;
+			changed = true;
+		}
+	} else if (app.confirmedStage > 0 || app.callbackSeen || app.startError) {
+		app.confirmedStage = 0;
+		app.confirmedApi = 0;
+		app.callbackSeen = 0;
+		app.authorizationError = app.startError = 0;
+		app.mappingLost = true;
+		changed = true;
+	}
+	if (!app.noReplyYet && app.confirmedStage == 0 &&
+		app.statusReadError == ERROR_FILE_NOT_FOUND &&
+		now - app.trackedSince >= 8000) {
+		app.noReplyYet = true;
+		changed = true;
+	}
+	if (changed) showOcatStatus();
+}
+
+static bool removeOcatHook(HHOOK* hook) {
+	if (!*hook) return true;
+	if (!UnhookWindowsHookEx(*hook) && GetLastError() != ERROR_INVALID_HOOK_HANDLE)
+		return false;
+	*hook = NULL;
+	return true;
+}
+
+static void wakeOcatWindow(HWND window) {
+	DWORD_PTR ignored = 0;
+	SetLastError(ERROR_SUCCESS);
+	if (SendMessageTimeoutW(window, WM_NULL, 0, 0,
+		SMTO_ABORTIFHUNG | SMTO_BLOCK, 500, &ignored)) {
+		status("Window wake delivered; waiting for target DLL acknowledgement.");
+	} else {
+		char message[128];
+		DWORD error = GetLastError();
+		snprintf(message, sizeof(message),
+			"Window wake %s (error %lu); target DLL unconfirmed.",
+			error == ERROR_ACCESS_DENIED ? "denied" : "blocked or timed out",
+			(unsigned long)error);
+		status(message);
+	}
+}
+
+static void trackOcatStatus(DWORD pid, int injectionResult, HANDLE target) {
+	removeOcatHook(&app.windowHook);
+	if (app.trackedProcess) CloseHandle(app.trackedProcess);
+	app.trackedProcess = target;
+	app.trackedPid = pid;
+	app.injectorResult = injectionResult;
+	app.confirmedStage = 0;
+	app.confirmedApi = 0;
+	app.statusReadError = ERROR_SUCCESS;
+	app.callbackSeen = 0;
+	app.authorizationError = app.startError = 0;
+	app.trackedSince = GetTickCount64();
+	app.lastStatusPoll = 0;
+	app.noReplyYet = false;
+	app.targetStopped = false;
+	app.targetStateUnknown = false;
+	app.mappingLost = false;
+	showOcatStatus();
+	pollOcatStatus();
+}
+
+static bool stopOcatWatch() {
+	// Revoke drawing first, even if removing the Windows hook fails.
+	OCATWatchStop();
+	app.watchPath[0] = 0;
+	EnableWindow(app.stopWatch, FALSE);
+	if (app.trackedProcess) CloseHandle(app.trackedProcess);
+	app.trackedProcess = NULL;
+	app.trackedPid = 0;
+	SetWindowTextA(app.renderStatus, "Rendering disabled. Loaded DLLs stay until the game exits.");
+	bool removedWindow = removeOcatHook(&app.windowHook);
+	bool removedStartup = removeOcatHook(&app.cbtHook);
+	if (!removedWindow || !removedStartup) {
+		EnableWindow(app.stopWatch, TRUE);
+		status("Could not remove the current Windows hook.");
+		return false;
+	}
+	SetWindowTextW(app.window, L"RivaCross (OCAT)");
+	return true;
+}
+
+static void saveWatch(const wchar_t* path) {
+	wchar_t ini[MAX_PATH];
+	if (!besideExe(ini, L"config\\ocat-watch.ini")) return;
+	CreateDirectoryA(app.configDir, NULL);
+	WritePrivateProfileStringW(L"Watch", L"Executable", path, ini);
+	WritePrivateProfileStringW(L"Watch", L"Enabled", path && path[0] ? L"1" : L"0", ini);
+}
+
+static bool watchLaunch(const wchar_t* game) {
+	wchar_t dll[MAX_PATH];
+	DWORD binaryType = 0;
+	if (isCs2(game) || !GetBinaryTypeW(game, &binaryType) ||
+		binaryType != SCS_64BIT_BINARY) {
+		status("Choose a 64-bit game executable. CS2 is excluded.");
+		return false;
+	}
+	if (!prepareOcat(dll, NULL) || !stopOcatWatch()) return false;
+	if (!loadOcatHookModule()) {
+		status("Lightweight hook DLL missing or could not load.");
+		return false;
+	}
+	HOOKPROC callback = app.cbtModule ?
+		(HOOKPROC)GetProcAddress(app.cbtModule, "GlobalHookProc") : NULL;
+	if (!callback || !OCATWatchArm(game, 0, OCATWatchLaunch)) {
+		status("Could not prepare the startup watcher.");
+		return false;
+	}
+	app.cbtHook = SetWindowsHookExW(WH_CBT, callback, app.cbtModule, 0);
+	if (!app.cbtHook) {
+		char message[96];
+		snprintf(message, sizeof(message), "Startup hook failed (error %lu).",
+			(unsigned long)GetLastError());
+		OCATWatchStop();
+		status(message);
+		return false;
+	}
+	GetSystemTimeAsFileTime(&app.watchArmedAt);
+	wcscpy(app.watchPath, game);
+	wchar_t title[MAX_PATH + 40];
+	swprintf(title, MAX_PATH + 40, L"RivaCross (OCAT) - %ls", game);
+	SetWindowTextW(app.window, title);
+	app.lastWatchPoll = 0;
+	if (app.trackedProcess) CloseHandle(app.trackedProcess);
+	app.trackedProcess = NULL;
+	app.trackedPid = 0;
+	EnableWindow(app.stopWatch, TRUE);
+	wchar_t message[MAX_PATH + 80];
+	const wchar_t* name = wcsrchr(game, L'\\');
+	swprintf(message, MAX_PATH + 80, L"Watching %ls. Start via Steam/WeGame.", name ? name + 1 : game);
+	SetWindowTextW(app.status, message);
+	SetWindowTextA(app.renderStatus, "Waiting for the selected game. Keep this window open.");
+	return true;
+}
+
+static void chooseWatch() {
+	if (!readControls()) return;
+	wchar_t game[MAX_PATH] = L"";
+	OPENFILENAMEW dialog = {};
+	dialog.lStructSize = sizeof(dialog);
+	dialog.hwndOwner = app.window;
+	dialog.lpstrTitle = L"Select the actual game EXE, then start it from Steam/WeGame";
+	dialog.lpstrFilter = L"64-bit game executable (*.exe)\0*.exe\0";
+	dialog.lpstrFile = game;
+	dialog.nMaxFile = MAX_PATH;
+	dialog.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+	if (GetOpenFileNameW(&dialog) && watchLaunch(game)) saveWatch(game);
+}
+
+static void restoreWatch() {
+	wchar_t ini[MAX_PATH], game[MAX_PATH];
+	if (besideExe(ini, L"config\\ocat-watch.ini") &&
+		GetPrivateProfileIntW(L"Watch", L"Enabled", 0, ini) &&
+		GetPrivateProfileStringW(L"Watch", L"Executable", L"", game, MAX_PATH, ini))
+		watchLaunch(game);
+}
+
+static BOOL CALLBACK findWatchedWindow(HWND window, LPARAM) {
+	if (!IsWindowVisible(window)) return TRUE;
+	DWORD pid = 0;
+	GetWindowThreadProcessId(window, &pid);
+	if (!pid || pid == GetCurrentProcessId()) return TRUE;
+	HANDLE target = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+	if (!target) return TRUE;
+	wchar_t path[MAX_PATH];
+	DWORD length = MAX_PATH;
+	if (QueryFullProcessImageNameW(target, 0, path, &length) &&
+		_wcsicmp(path, app.watchPath) == 0 && WaitForSingleObject(target, 0) == WAIT_TIMEOUT) {
+		FILETIME created, exited, kernel, user;
+		if (GetProcessTimes(target, &created, &exited, &kernel, &user) &&
+			CompareFileTime(&created, &app.watchArmedAt) < 0) {
+			SetWindowTextA(app.renderStatus,
+				"Game was already running. Restart it for startup watching.");
+			CloseHandle(target);
+			return TRUE;
+		}
+		trackOcatStatus(pid, OcatHookInstalled, target);
+		// CBT may have missed an event. Try the same bounded message entry used
+		// by manual window attachment, retaining the startup hook for future PIDs.
+		if (!app.confirmedStage && !app.windowHook) {
+			HOOKPROC callback = (HOOKPROC)GetProcAddress(app.cbtModule, "GlobalHookProc");
+			app.windowHook = callback ? SetWindowsHookExW(WH_CALLWNDPROC, callback,
+				app.cbtModule, GetWindowThreadProcessId(window, NULL)) : NULL;
+			if (app.windowHook) wakeOcatWindow(window);
+			else {
+				char message[96];
+				snprintf(message, sizeof(message), "Startup window hook failed (error %lu).",
+					(unsigned long)GetLastError());
+				status(message);
+			}
+		}
+		return FALSE;
+	}
+	CloseHandle(target);
+	return TRUE;
+}
+
+static void pollWatch() {
+	ULONGLONG now = GetTickCount64();
+	if (now - app.lastWatchPoll < 250) return;
+	app.lastWatchPoll = now;
+	OCATWatchHeartbeat();
+	// Selection is by full path, not process name. Only one instance is tracked in the GUI.
+	if (app.watchPath[0] && (!app.trackedPid || app.targetStopped))
+		EnumWindows(findWatchedWindow, 0);
+}
+
 struct AttachCandidate {
 	DWORD pid;
+	HWND window;
+	DWORD threadId;
 	wchar_t path[MAX_PATH];
 	enum { Ready, ModuleScanUnavailable, D3D12Only } state;
 	DWORD scanError;
 	bool d3d12, rtssHook;
 };
 
-static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
+static bool inspectCandidate(DWORD pid, AttachCandidate* candidate, bool windowMode) {
 	if (pid <= 4 || pid == GetCurrentProcessId()) return false;
 	DWORD session = 0, ownSession = 0;
 	if (!ProcessIdToSessionId(pid, &session) ||
 		!ProcessIdToSessionId(GetCurrentProcessId(), &ownSession) ||
 		session != ownSession) return false;
-	HANDLE process = OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD |
-		PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ, FALSE, pid);
+	DWORD access = windowMode ? PROCESS_QUERY_LIMITED_INFORMATION :
+		PROCESS_QUERY_INFORMATION | PROCESS_CREATE_THREAD |
+		PROCESS_VM_OPERATION | PROCESS_VM_WRITE | PROCESS_VM_READ;
+	HANDLE process = OpenProcess(access, FALSE, pid);
 	if (!process) return false; // Protected or inaccessible processes are not candidates.
 	wchar_t path[MAX_PATH];
 	DWORD capacity = MAX_PATH;
@@ -338,14 +751,18 @@ static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
 	DWORD binaryType = 0;
 	if (!GetBinaryTypeW(path, &binaryType) || binaryType != SCS_64BIT_BINARY)
 		return false;
+	candidate->pid = pid;
+	wcscpy(candidate->path, path);
+	if (windowMode) {
+		candidate->state = AttachCandidate::Ready;
+		return true; // A window thread can be hooked before D3D modules are loaded.
+	}
 	HANDLE snapshot = INVALID_HANDLE_VALUE;
 	for (int attempt = 0; attempt < 3; ++attempt) {
 		snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPMODULE, pid);
 		if (snapshot != INVALID_HANDLE_VALUE || GetLastError() != ERROR_BAD_LENGTH) break;
 	}
 	DWORD scanError = snapshot == INVALID_HANDLE_VALUE ? GetLastError() : 0;
-	candidate->pid = pid;
-	wcscpy(candidate->path, path);
 	if (snapshot == INVALID_HANDLE_VALUE) {
 		candidate->state = AttachCandidate::ModuleScanUnavailable;
 		candidate->scanError = scanError;
@@ -376,6 +793,7 @@ static bool inspectCandidate(DWORD pid, AttachCandidate* candidate) {
 enum { IdCandidateList = 600, IdRefreshCandidates };
 struct AttachPicker {
 	HWND list, attach, hint;
+	bool windowMode;
 	int count;
 	// ponytail: 256 visible candidates are enough for a manual picker; use a vector if this ceiling is hit.
 	AttachCandidate candidates[256];
@@ -391,22 +809,34 @@ static BOOL CALLBACK scanCandidateWindow(HWND window, LPARAM parameter) {
 	if (!IsWindowVisible(window)) return TRUE;
 	CandidateScan* scan = (CandidateScan*)parameter;
 	DWORD pid = 0;
-	GetWindowThreadProcessId(window, &pid);
-	for (int i = 0; i < scan->count; ++i)
-		if (scan->seen[i] == pid) return TRUE;
-	if (scan->count == 512 || picker.count == 256) return FALSE;
-	scan->seen[scan->count++] = pid;
+	DWORD threadId = GetWindowThreadProcessId(window, &pid);
+	if (!threadId) return TRUE;
+	if (!picker.windowMode) {
+		for (int i = 0; i < scan->count; ++i)
+			if (scan->seen[i] == pid) return TRUE;
+		if (scan->count == 512) return FALSE;
+		scan->seen[scan->count++] = pid;
+	}
+	if (picker.count == 256) return FALSE;
 	AttachCandidate candidate = {};
-	if (!inspectCandidate(pid, &candidate)) return TRUE;
+	if (!inspectCandidate(pid, &candidate, picker.windowMode)) return TRUE;
+	candidate.window = window;
+	candidate.threadId = threadId;
 	picker.candidates[picker.count++] = candidate;
-	wchar_t label[MAX_PATH + 100];
+	wchar_t label[MAX_PATH + 200];
 	const wchar_t* slash = wcsrchr(candidate.path, L'\\');
-	if (candidate.state == AttachCandidate::ModuleScanUnavailable)
-		swprintf(label, MAX_PATH + 100,
+	if (picker.windowMode) {
+		wchar_t title[96] = L"";
+		GetWindowTextW(window, title, 96);
+		swprintf(label, MAX_PATH + 200, L"%ls - %ls   PID %lu, thread %lu",
+			title[0] ? title : L"(untitled)", slash ? slash + 1 : candidate.path,
+			(unsigned long)candidate.pid, (unsigned long)threadId);
+	} else if (candidate.state == AttachCandidate::ModuleScanUnavailable)
+		swprintf(label, MAX_PATH + 200,
 			L"%ls   PID %lu - module scan unavailable (error %lu)",
 			slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid,
 			(unsigned long)candidate.scanError);
-	else swprintf(label, MAX_PATH + 100, L"%ls   PID %lu%ls",
+	else swprintf(label, MAX_PATH + 200, L"%ls   PID %lu%ls",
 		slash ? slash + 1 : candidate.path, (unsigned long)candidate.pid,
 		candidate.d3d12 && candidate.rtssHook ?
 			L" - D3D12 loaded; RTSS hook present" :
@@ -420,7 +850,7 @@ static void updateAttachButton() {
 	int index = (int)SendMessageW(picker.list, LB_GETCURSEL, 0, 0);
 	bool selected = index >= 0 && index < picker.count;
 	EnableWindow(picker.attach, selected);
-	SetWindowTextW(picker.attach, selected &&
+	SetWindowTextW(picker.attach, picker.windowMode ? L"Attach selected" : selected &&
 		(picker.candidates[index].state != AttachCandidate::Ready ||
 			(picker.candidates[index].d3d12 && picker.candidates[index].rtssHook)) ?
 		L"Try attach" : L"Attach selected");
@@ -438,18 +868,20 @@ static void refreshCandidates() {
 		SendMessageW(picker.list, LB_SETCURSEL, selected, 0);
 	}
 	updateAttachButton();
-	SetWindowTextW(picker.hint, picker.count ?
+	SetWindowTextW(picker.hint, picker.windowMode ?
+		(picker.count == 256 ? L"First 256 x64 windows shown; one wake message will be sent." :
+		L"Select a visible x64 window. One wake message will trigger the window hook.") : picker.count ?
 		L"Visible 64-bit apps; D3D11/12 or unverified. CS2 excluded." :
 		L"No D3D11/D3D12 apps detected. Start an app, then click Refresh.");
 }
 
 static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM) {
 	if (message == WM_INITDIALOG) {
-		SetWindowTextW(window, L"Running applications");
+		SetWindowTextW(window, picker.windowMode ? L"Attach to a running window" :
+			L"Running applications");
 		RECT rect;
 		GetClientRect(window, &rect);
-		picker.hint = CreateWindowW(L"STATIC",
-			L"Visible 64-bit apps; D3D11/12 or unverified. CS2 excluded.",
+		picker.hint = CreateWindowW(L"STATIC", L"",
 			WS_CHILD | WS_VISIBLE, 10, 9, rect.right - 20, 22,
 			window, NULL, GetModuleHandleW(NULL), NULL);
 		picker.list = CreateWindowExW(WS_EX_CLIENTEDGE, L"LISTBOX", L"",
@@ -488,9 +920,52 @@ static INT_PTR CALLBACK pickerProc(HWND window, UINT message, WPARAM key, LPARAM
 	return FALSE;
 }
 
-static void attachRunning() {
+static bool installWindowHook(const wchar_t* path, DWORD threadId, DWORD pid, HANDLE target) {
+	if (!stopOcatWatch()) {
+		CloseHandle(target);
+		return false;
+	}
+	if (!OCATWatchArm(path, pid, OCATWatchThread)) {
+		status("Could not authorize the selected window hook.");
+		CloseHandle(target);
+		return false;
+	}
+	saveWatch(NULL);
+	loadOcatHookModule();
+	if (!app.cbtModule) {
+		OCATWatchStop();
+		status("Lightweight hook DLL missing or could not load.");
+		CloseHandle(target);
+		return false;
+	}
+	HOOKPROC hookProc = (HOOKPROC)GetProcAddress(app.cbtModule, "GlobalHookProc");
+	if (!hookProc) {
+		OCATWatchStop();
+		status("OCAT DLL does not export GlobalHookProc.");
+		CloseHandle(target);
+		return false;
+	}
+	// A sent WM_NULL invokes WH_CALLWNDPROC without requiring a later CBT event.
+	HHOOK hook = SetWindowsHookExW(WH_CALLWNDPROC, hookProc, app.cbtModule, threadId);
+	if (!hook) {
+		char message[96];
+		snprintf(message, sizeof(message), "Window hook installation failed (error %lu).",
+			(unsigned long)GetLastError());
+		OCATWatchStop();
+		status(message);
+		CloseHandle(target);
+		return false;
+	}
+	app.cbtHook = hook;
+	EnableWindow(app.stopWatch, TRUE);
+	trackOcatStatus(pid, OcatHookInstalled, target);
+	return true;
+}
+
+static void attachRunning(bool windowMode) {
 	wchar_t dll[MAX_PATH], injector[MAX_PATH];
-	if (!prepareOcat(dll, injector)) return;
+	if (!prepareOcat(dll, windowMode ? NULL : injector)) return;
+	picker.windowMode = windowMode;
 	static const struct {
 		DLGTEMPLATE dialog;
 		WORD menu, windowClass, title;
@@ -514,7 +989,7 @@ static void attachRunning() {
 	}
 	AttachCandidate current = {};
 	if (WaitForSingleObject(target, 0) != WAIT_TIMEOUT ||
-		!inspectCandidate(selected.pid, &current) ||
+		!inspectCandidate(selected.pid, &current, windowMode) ||
 		_wcsicmp(selected.path, current.path) != 0) {
 		CloseHandle(target);
 		status("Process changed or exited. Refresh the list and try again.");
@@ -527,8 +1002,25 @@ static void attachRunning() {
 		CloseHandle(target);
 		return;
 	}
+	if (windowMode) {
+		DWORD owner = 0;
+		DWORD threadId = GetWindowThreadProcessId(selected.window, &owner);
+		if (!threadId || owner != selected.pid || threadId != selected.threadId) {
+			CloseHandle(target);
+			status("Selected window changed or exited. Refresh and try again.");
+			return;
+		}
+		if (!installWindowHook(selected.path, threadId, selected.pid, target)) return;
+		wakeOcatWindow(selected.window);
+		pollOcatStatus();
+		return;
+	}
+	if (!stopOcatWatch() || !OCATWatchArm(selected.path, selected.pid, OCATWatchRemote)) {
+		CloseHandle(target);
+		return;
+	}
+	saveWatch(NULL);
 	int result = runInjector(dll, injector, selected.pid);
-	CloseHandle(target);
 	status(result == 1 ?
 		(current.d3d12 && current.rtssHook ?
 			"DLL loaded; RTSS hook present. Rendering/flip unverified." :
@@ -536,6 +1028,7 @@ static void attachRunning() {
 		result == 0 ? "Injector timed out; DLL may still load later." :
 		result == 2 ? "Access denied by target process (error 5); DLL was not loaded." :
 		"OCAT injection failed; see injector log.");
+	trackOcatStatus(selected.pid, result, target);
 }
 
 static void launchGame() {
@@ -584,15 +1077,17 @@ static void launchGame() {
 		return;
 	}
 
-	int injection = runInjector(dll, injector, target.dwProcessId);
+	bool armed = stopOcatWatch() && OCATWatchArm(game, target.dwProcessId, OCATWatchRemote);
+	if (armed) saveWatch(NULL);
+	int injection = armed ? runInjector(dll, injector, target.dwProcessId) : -1;
 	DWORD resumed = ResumeThread(target.hThread);
 	CloseHandle(target.hThread);
-	CloseHandle(target.hProcess);
 	status(resumed == (DWORD)-1 ? "Could not resume the selected game." :
 		injection == 1 ? "Game resumed; rendering and flip mode unverified." :
 		injection == 0 ? "Injector timed out; DLL may still load later." :
 		injection == 2 ? "Access denied by target process (error 5); DLL was not loaded." :
 		"Game resumed; OCAT injection failed.");
+	trackOcatStatus(target.dwProcessId, injection, target.hProcess);
 }
 #endif
 
@@ -614,25 +1109,35 @@ static void beginCapture(HWND button) {
 }
 
 static void acceptCapture(HWND button, int code) {
+	bool masterWasOff = button == app.master && !app.hotkeyState.masterEnabled;
 	int modifiers = (GetKeyState(VK_CONTROL) & 0x8000 ? 1 : 0) |
 		(GetKeyState(VK_SHIFT) & 0x8000 ? 2 : 0) |
 		(GetKeyState(VK_MENU) & 0x8000 ? 4 : 0);
-	if (button == app.hotkey) {
-		app.hotkeyState.keyCode = code;
-		app.hotkeyState.modifierMask = code ? modifiers : 0;
-		app.hotkeyState.prevAsyncState = true;
+	if (button == app.hotkey || button == app.secondaryHotkey) {
+		bool secondary = button == app.secondaryHotkey;
+		(secondary ? app.hotkeyState.secondaryKeyCode : app.hotkeyState.keyCode) = code;
+		(secondary ? app.hotkeyState.secondaryModifierMask : app.hotkeyState.modifierMask) = code ? modifiers : 0;
+		(secondary ? app.hotkeyState.secondaryPrevAsyncState : app.hotkeyState.prevAsyncState) = true;
 		if (code && SendMessageA(app.mode, CB_GETCURSEL, 0, 0) == HotkeyNone)
 			SendMessageA(app.mode, CB_SETCURSEL, HotkeyToggle, 0);
-		if (!code) SendMessageA(app.mode, CB_SETCURSEL, HotkeyNone, 0);
+		if (!app.hotkeyState.keyCode && !app.hotkeyState.secondaryKeyCode)
+			SendMessageA(app.mode, CB_SETCURSEL, HotkeyNone, 0);
 		app.hotkeyState.mode = (HotkeyMode)SendMessageA(app.mode, CB_GETCURSEL, 0, 0);
 	} else {
 		app.hotkeyState.masterKeyCode = code;
 		app.hotkeyState.masterModifierMask = code ? modifiers : 0;
-		app.hotkeyState.masterEnabled = true;
+		if (masterWasOff) setMasterEnabled(true);
 		app.hotkeyState.masterPrevAsyncState = true;
 	}
 	endCapture(code ? "Hotkey set. Click Apply + Save to keep it." :
 		"Hotkey cleared. Click Apply + Save to keep it.");
+	if (masterWasOff) {
+		sendOverlay();
+		refreshVisibility();
+#ifdef RIVACROSS_OCAT
+		showOcatStatus();
+#endif
+	}
 }
 
 static LRESULT CALLBACK captureProc(HWND hwnd, UINT message, WPARAM key, LPARAM param) {
@@ -671,38 +1176,39 @@ static LRESULT CALLBACK captureProc(HWND hwnd, UINT message, WPARAM key, LPARAM 
 	return CallWindowProcA(app.buttonProc, hwnd, message, key, param);
 }
 
-static bool keyDown(int key, int modifiers) {
-	if (!key || !(GetAsyncKeyState(key) & 0x8000)) return false;
-	if ((modifiers & 1) && !(GetAsyncKeyState(VK_CONTROL) & 0x8000)) return false;
-	if ((modifiers & 2) && !(GetAsyncKeyState(VK_SHIFT) & 0x8000)) return false;
-	if ((modifiers & 4) && !(GetAsyncKeyState(VK_MENU) & 0x8000)) return false;
-	return true;
-}
-
 static void pollHotkeys() {
+	if (app.captureTarget) return;
 	HotkeyState* hotkey = &app.hotkeyState;
+	bool wasVisible = crosshairVisible();
 	bool master = keyDown(hotkey->masterKeyCode, hotkey->masterModifierMask);
-	if (master && !hotkey->masterPrevAsyncState) {
-		hotkey->masterEnabled = !hotkey->masterEnabled;
-		status(hotkey->masterEnabled ? "Hotkeys enabled." : "Hotkeys paused.");
+	bool masterChanged = master && !hotkey->masterPrevAsyncState;
+	if (masterChanged) {
+		setMasterEnabled(!hotkey->masterEnabled);
+		status(hotkey->masterEnabled ? "Crosshair master ON." :
+			"Crosshair master OFF.");
 	}
 	hotkey->masterPrevAsyncState = master;
 	bool pressed = keyDown(hotkey->keyCode, hotkey->modifierMask);
-	if (hotkey->masterEnabled && hotkey->mode != HotkeyNone && hotkey->keyCode) {
-		bool visible = hotkey->visible;
-		if (hotkey->mode == HotkeyHold) visible = pressed;
-		else if (pressed && !hotkey->prevAsyncState) visible = !visible;
-		if (visible != hotkey->visible) {
-			hotkey->visible = visible;
-			if (sendOverlay() != 0) {
+	bool secondaryPressed = keyDown(hotkey->secondaryKeyCode, hotkey->secondaryModifierMask);
+	if (!masterChanged && hotkey->masterEnabled && hotkey->mode != HotkeyNone &&
+		(hotkey->keyCode || hotkey->secondaryKeyCode)) {
+		if (hotkey->mode == HotkeyHold) hotkey->visible = pressed || secondaryPressed;
+		else if ((pressed && !hotkey->prevAsyncState) ||
+			(secondaryPressed && !hotkey->secondaryPrevAsyncState)) hotkey->visible = !hotkey->visible;
+	}
+	if (masterChanged || wasVisible != crosshairVisible()) {
+		if (sendOverlay() != 0) {
 #ifdef RIVACROSS_OCAT
-				status("OCAT bridge unavailable. Restart RivaCrossOCAT.");
+			status("OCAT bridge unavailable. Restart RivaCrossOCAT.");
 #endif
-			}
-			SetWindowTextA(app.visibleButton, visible ? "Hide" : "Show");
 		}
+		refreshVisibility();
+#ifdef RIVACROSS_OCAT
+		showOcatStatus();
+#endif
 	}
 	hotkey->prevAsyncState = pressed;
+	hotkey->secondaryPrevAsyncState = secondaryPressed;
 }
 
 static void createControls() {
@@ -742,29 +1248,45 @@ static void createControls() {
 	SendMessageA(app.mode, CB_ADDSTRING, 0, (LPARAM)"Toggle");
 	app.hotkey = control("BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON,
 		270, 182, 230, 27, IdHotkey);
-	control("STATIC", "Master toggle", 0, 20, 225, 110, 22);
+	control("STATIC", "Hotkey 2 (OR)", 0, 20, 225, 110, 22);
+	app.secondaryHotkey = control("BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON,
+		140, 222, 360, 27, IdSecondaryHotkey);
+	control("STATIC", "Master toggle", 0, 20, 265, 110, 22);
 	app.master = control("BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON,
-		140, 222, 360, 27, IdMaster);
+		140, 262, 360, 27, IdMaster);
 	app.buttonProc = (WNDPROC)SetWindowLongPtrA(app.hotkey, GWLP_WNDPROC, (LONG_PTR)captureProc);
+	SetWindowLongPtrA(app.secondaryHotkey, GWLP_WNDPROC, (LONG_PTR)captureProc);
 	SetWindowLongPtrA(app.master, GWLP_WNDPROC, (LONG_PTR)captureProc);
-	control("BUTTON", "Load...", WS_TABSTOP, 20, 270, 95, 30, IdLoad);
-	control("BUTTON", "Save As...", WS_TABSTOP, 125, 270, 105, 30, IdSaveAs);
+	control("BUTTON", "Load...", WS_TABSTOP, 20, 310, 95, 30, IdLoad);
+	control("BUTTON", "Save As...", WS_TABSTOP, 125, 310, 105, 30, IdSaveAs);
 	control("BUTTON", "Apply + Save", WS_TABSTOP | BS_DEFPUSHBUTTON,
-		240, 270, 125, 30, IdApply);
+		240, 310, 125, 30, IdApply);
 	app.visibleButton = control("BUTTON", "Hide", WS_TABSTOP,
-		375, 270, 125, 30, IdVisible);
+		375, 310, 125, 30, IdVisible);
 	control("BUTTON", "Clear clipboard...", WS_TABSTOP,
-		20, 315, 150, 28, IdClipboard);
+		20, 355, 150, 28, IdClipboard);
 #ifdef RIVACROSS_OCAT
 	control("BUTTON", "Launch game...", WS_TABSTOP,
-		190, 315, 150, 28, IdLaunch);
+		190, 355, 150, 28, IdLaunch);
 	control("BUTTON", "Attach running...", WS_TABSTOP,
-		350, 315, 150, 28, IdAttach);
+		350, 355, 150, 28, IdAttach);
+	control("BUTTON", "Attach window...", WS_TABSTOP,
+		350, 392, 150, 28, IdAttachWindow);
+	control("BUTTON", "Watch launch...", WS_TABSTOP,
+		20, 392, 150, 28, IdWatch);
+	app.stopWatch = control("BUTTON", "Stop watching", WS_TABSTOP,
+		190, 392, 150, 28, IdStopWatch);
+	EnableWindow(app.stopWatch, FALSE);
 #else
 	app.keep = control("BUTTON", "Leave crosshair visible when closing",
-		WS_TABSTOP | BS_AUTOCHECKBOX, 190, 315, 310, 28, IdKeep);
+		WS_TABSTOP | BS_AUTOCHECKBOX, 190, 355, 310, 28, IdKeep);
 #endif
-	app.status = control("STATIC", "", 0, 20, 365, 490, 22, IdStatus);
+#ifdef RIVACROSS_OCAT
+	app.status = control("STATIC", "", 0, 20, 426, 490, 22, IdStatus);
+	app.renderStatus = control("STATIC", "", 0, 20, 449, 490, 35);
+#else
+	app.status = control("STATIC", "", 0, 20, 405, 490, 22, IdStatus);
+#endif
 }
 
 static void defaultConfigPath() {
@@ -791,12 +1313,16 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 		loadConfig(app.configPath, &app.config, &app.hotkeyState);
 		refreshControls();
 		updateOverlay();
+#ifdef RIVACROSS_OCAT
+		restoreWatch();
+#endif
 		SetTimer(hwnd, 1, 10, NULL);
 		return 0;
 	case WM_COMMAND:
 		if (HIWORD(wParam) == BN_CLICKED) {
 			switch (LOWORD(wParam)) {
 			case IdHotkey:
+			case IdSecondaryHotkey:
 			case IdMaster:
 				PostMessageA(hwnd, WM_APP + 1, LOWORD(wParam), 0);
 				return 0;
@@ -809,12 +1335,24 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 			case IdNudgeRight: nudgePosition(1, 0); return 0;
 #ifdef RIVACROSS_OCAT
 			case IdLaunch: launchGame(); return 0;
-			case IdAttach: attachRunning(); return 0;
+			case IdAttach: attachRunning(false); return 0;
+			case IdAttachWindow: attachRunning(true); return 0;
+			case IdWatch: chooseWatch(); return 0;
+			case IdStopWatch:
+				if (stopOcatWatch()) {
+					saveWatch(NULL);
+					status("Startup watching stopped. Rendering disabled.");
+				}
+				return 0;
 #endif
 			case IdVisible:
+				if (!app.hotkeyState.masterEnabled) return 0;
 				app.hotkeyState.visible = !app.hotkeyState.visible;
 				updateOverlay();
-				SetWindowTextA(app.visibleButton, app.hotkeyState.visible ? "Hide" : "Show");
+				refreshVisibility();
+#ifdef RIVACROSS_OCAT
+				showOcatStatus();
+#endif
 				return 0;
 			case IdClipboard:
 				if (MessageBoxA(hwnd, "Clear the Windows clipboard?", "Confirm",
@@ -834,23 +1372,36 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 		}
 		break;
 	case WM_APP + 1:
-		beginCapture(wParam == IdHotkey ? app.hotkey : app.master);
+		beginCapture(wParam == IdHotkey ? app.hotkey :
+			wParam == IdSecondaryHotkey ? app.secondaryHotkey : app.master);
 		return 0;
 	case WM_TIMER:
 		pollHotkeys();
+#ifdef RIVACROSS_OCAT
+		pollWatch();
+		pollOcatStatus();
+#endif
 		return 0;
-	case WM_DESTROY:
+	case WM_DESTROY: {
 		KillTimer(hwnd, 1);
 #ifdef RIVACROSS_OCAT
+		OCATWatchStop();
+		if (app.trackedProcess) CloseHandle(app.trackedProcess);
+		bool removedWindow = removeOcatHook(&app.windowHook);
+		bool removedStartup = removeOcatHook(&app.cbtHook);
+		if (removedWindow && removedStartup && app.cbtModule)
+			FreeLibrary(app.cbtModule);
 		OCATSharedUpdate(&app.config, false);
 		OCATSharedClose();
 #else
-		if (SendMessageA(app.keep, BM_GETCHECK, 0, 0) == BST_CHECKED)
+		if (app.hotkeyState.masterEnabled &&
+			SendMessageA(app.keep, BM_GETCHECK, 0, 0) == BST_CHECKED)
 			RTSSUpdateOSDVisibility(&app.config, OsdEntry, true);
 		else RTSSReleaseOSDEntry(OsdEntry);
 #endif
 		PostQuitMessage(0);
 		return 0;
+	}
 	case WM_NCDESTROY:
 		if (app.font && app.font != GetStockObject(DEFAULT_GUI_FONT)) DeleteObject(app.font);
 		return DefWindowProcA(hwnd, message, wParam, lParam);
@@ -858,7 +1409,22 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 	return DefWindowProcA(hwnd, message, wParam, lParam);
 }
 
-int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
+int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int show) {
+#ifdef RIVACROSS_OCAT
+	if (arguments && strncmp(arguments, "--ocat-probe ", 13) == 0) {
+		unsigned long controller = 0;
+		char extra = 0;
+		if (sscanf(arguments + 13, "%lu %c", &controller, &extra) != 1 || !controller) return 2;
+		wchar_t dll[MAX_PATH];
+		if (!besideExe(dll, L"ocat\\bin\\gameoverlay64-flip.dll")) return 2;
+		HMODULE library = LoadLibraryW(dll);
+		typedef DWORD(WINAPI* BuildProbe)(LPVOID);
+		BuildProbe build = library ? (BuildProbe)GetProcAddress(library, "BuildRivaCrossHookCache") : NULL;
+		DWORD result = build ? build((LPVOID)(ULONG_PTR)controller) : 0;
+		if (library) FreeLibrary(library);
+		return result ? 0 : 1;
+	}
+#endif
 	WNDCLASSA wc = {};
 	wc.lpfnWndProc = windowProc;
 	wc.hInstance = instance;
@@ -866,7 +1432,13 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR, int show) {
 	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
 	wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
 	if (!RegisterClassA(&wc)) return 1;
-	RECT size = { 0, 0, 520, 405 };
+	RECT size = { 0, 0, 520,
+#ifdef RIVACROSS_OCAT
+		495
+#else
+		445
+#endif
+	};
 	AdjustWindowRect(&size, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 	HWND window = CreateWindowExA(0, wc.lpszClassName,
 #ifdef RIVACROSS_OCAT

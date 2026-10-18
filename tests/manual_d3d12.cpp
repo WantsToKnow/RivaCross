@@ -8,6 +8,12 @@
 
 using Microsoft::WRL::ComPtr;
 
+static DWORD WINAPI deadline(void*) {
+	Sleep(7500);
+	TerminateProcess(GetCurrentProcess(), 124);
+	return 0;
+}
+
 static LRESULT CALLBACK windowProc(HWND window, UINT message, WPARAM key, LPARAM param) {
 	if (message == WM_KEYDOWN && key == VK_ESCAPE) { DestroyWindow(window); return 0; }
 	if (message == WM_DESTROY) { PostQuitMessage(0); return 0; }
@@ -21,6 +27,9 @@ static bool check(HRESULT result, const wchar_t* action) {
 }
 
 int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR arguments, int) {
+	HANDLE guard = CreateThread(nullptr, 0, deadline, nullptr, 0, nullptr);
+	if (!guard) return 2;
+	CloseHandle(guard);
 	const bool twoQueues = arguments && wcsstr(arguments, L"--two-queues");
 	const bool resizeRepeatedly = arguments && wcsstr(arguments, L"--resize");
 	WNDCLASSW type = {};

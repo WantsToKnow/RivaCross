@@ -1,0 +1,308 @@
+diff --git a/GameOverlay/d3d/source/OCATProbeShared.h b/GameOverlay/d3d/source/OCATProbeShared.h
+new file mode 100644
+index 0000000..0f0d05e
+--- /dev/null
++++ b/GameOverlay/d3d/source/OCATProbeShared.h
+@@ -0,0 +1,22 @@
++#pragma once
++#include <windows.h>
++
++#define RIVACROSS_OCAT_PROBE_PREFIX L"Local\\RivaCrossOCATProbeV1-"
++#define RIVACROSS_OCAT_PROBE_MAGIC 0x50414352u
++#define RIVACROSS_OCAT_PROBE_VERSION 1u
++
++struct OCATProbeAddress {
++	DWORD rva, timestamp, imageSize;
++	wchar_t module[MAX_PATH];
++};
++
++struct OCATProbeTargets {
++	OCATProbeAddress present, present1, resize, resize1, release;
++};
++
++struct OCATProbeShared {
++	DWORD magic, version, controllerPid;
++	volatile LONG ready; // bit 0: D3D11, bit 1: D3D12; published last
++	OCATProbeTargets d3d11, d3d12;
++	OCATProbeAddress execute;
++};
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+index 7d1b4f0..e2b788f 100644
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -32,8 +32,10 @@
+ #include "d3d11_renderer.hpp"
+ #include "d3d12_renderer.hpp"
+ #include "../OCATStatus.h"
++#include "../OCATProbeShared.h"
+ extern bool RivaCrossWatchAllowed(bool remoteOnly = false);
+ #include <cwchar>
++#include <cstring>
+ #include <mutex>
+ #include <unordered_map>
+ #include <unordered_set>
+@@ -670,6 +672,26 @@ bool install_late_method(void *target, GameOverlay::hook::address replacement,
+   return true;
+ }
+ 
++bool install_late_targets(const DxgiTargets &targets, bool d3d12)
++{
++  bool success = install_late_method(targets.resize, reinterpret_cast<GameOverlay::hook::address>(
++      d3d12 ? &LateResizeBuffers12 : &LateResizeBuffers), d3d11_targets.resize, d3d12);
++  if (targets.resize1) success = install_late_method(targets.resize1,
++      reinterpret_cast<GameOverlay::hook::address>(
++          d3d12 ? &LateResizeBuffers112 : &LateResizeBuffers1),
++      d3d11_targets.resize1, d3d12) && success;
++  success = install_late_method(targets.release, reinterpret_cast<GameOverlay::hook::address>(
++      d3d12 ? &LateRelease12 : &LateRelease), d3d11_targets.release, d3d12) && success;
++  if (!success) return false;
++  success = install_late_method(targets.present, reinterpret_cast<GameOverlay::hook::address>(
++      d3d12 ? &LatePresent12 : &LatePresent), d3d11_targets.present, d3d12);
++  if (targets.present1) success = install_late_method(targets.present1,
++      reinterpret_cast<GameOverlay::hook::address>(
++          d3d12 ? &LatePresent112 : &LatePresent1),
++      d3d11_targets.present1, d3d12) && success;
++  return success;
++}
++
+ bool install_late_swapchain_hooks(IDXGISwapChain *chain, bool d3d12)
+ {
+   void **vtable = *reinterpret_cast<void ***>(chain);
+@@ -688,22 +710,10 @@ bool install_late_swapchain_hooks(IDXGISwapChain *chain, bool d3d12)
+       (present1 && !in_system_dxgi(present1)) ||
+       (resize1 && !in_system_dxgi(resize1))) return false;
+ 
+-  bool success = install_late_method(resize, reinterpret_cast<GameOverlay::hook::address>(
+-      d3d12 ? &LateResizeBuffers12 : &LateResizeBuffers), d3d11_targets.resize, d3d12);
+-  if (resize1) success = install_late_method(resize1,
+-      reinterpret_cast<GameOverlay::hook::address>(
+-          d3d12 ? &LateResizeBuffers112 : &LateResizeBuffers1),
+-      d3d11_targets.resize1, d3d12) && success;
+-  success = install_late_method(release, reinterpret_cast<GameOverlay::hook::address>(
+-      d3d12 ? &LateRelease12 : &LateRelease), d3d11_targets.release, d3d12) && success;
+-  if (!success) return false;
+-  success = install_late_method(present, reinterpret_cast<GameOverlay::hook::address>(
+-      d3d12 ? &LatePresent12 : &LatePresent), d3d11_targets.present, d3d12);
+-  if (present1) success = install_late_method(present1,
+-      reinterpret_cast<GameOverlay::hook::address>(
+-          d3d12 ? &LatePresent112 : &LatePresent1),
+-      d3d11_targets.present1, d3d12) && success;
+-  return success;
++  DxgiTargets targets;
++  targets.present = present; targets.present1 = present1;
++  targets.resize = resize; targets.resize1 = resize1; targets.release = release;
++  return install_late_targets(targets, d3d12);
+ }
+ } // namespace
+ 
+@@ -887,3 +897,182 @@ bool InstallLateD3D12Hook()
+                                      "Late D3D12 hooks unavailable");
+   return success;
+ }
++
++namespace {
++bool record_probe_address(void *address, OCATProbeAddress &result)
++{
++  HMODULE module = nullptr;
++  if (!address || !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++      GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, reinterpret_cast<LPCWSTR>(address), &module))
++    return false;
++  const DWORD length = GetModuleFileNameW(module, result.module, MAX_PATH);
++  if (!length || length >= MAX_PATH) return false;
++  const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(module);
++  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 4096) return false;
++  const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(
++      reinterpret_cast<const BYTE *>(module) + dos->e_lfanew);
++  if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC) return false;
++  const auto offset = reinterpret_cast<const BYTE *>(address) - reinterpret_cast<const BYTE *>(module);
++  if (offset <= 0 || static_cast<size_t>(offset) >= nt->OptionalHeader.SizeOfImage) return false;
++  result.rva = static_cast<DWORD>(offset);
++  result.timestamp = nt->FileHeader.TimeDateStamp;
++  result.imageSize = nt->OptionalHeader.SizeOfImage;
++  return true;
++}
++
++bool record_probe_targets(IDXGISwapChain *chain, OCATProbeTargets &result)
++{
++  ComPtr<IDXGISwapChain1> chain1;
++  ComPtr<IDXGISwapChain3> chain3;
++  if (FAILED(chain->QueryInterface(IID_PPV_ARGS(&chain1))) ||
++      FAILED(chain->QueryInterface(IID_PPV_ARGS(&chain3)))) return false;
++  void *addresses[] = { VTABLE(chain)[8], VTABLE(chain1.Get())[22], VTABLE(chain)[13],
++      VTABLE(chain3.Get())[39], VTABLE(chain)[2] };
++  OCATProbeAddress *records[] = { &result.present, &result.present1, &result.resize,
++      &result.resize1, &result.release };
++  for (size_t i = 0; i < 5; ++i)
++    if (!in_system_dxgi(addresses[i]) || !record_probe_address(addresses[i], *records[i])) return false;
++  return true;
++}
++
++void *resolve_probe_address(const OCATProbeAddress &record)
++{
++  if (!record.rva || record.rva >= record.imageSize || !record.module[0] ||
++      record.module[MAX_PATH - 1] != 0) return nullptr;
++  HMODULE module = GetModuleHandleW(record.module);
++  wchar_t actual[MAX_PATH];
++  const DWORD length = module ? GetModuleFileNameW(module, actual, MAX_PATH) : 0;
++  if (!length || length >= MAX_PATH || _wcsicmp(actual, record.module)) return nullptr;
++  const auto dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(module);
++  if (dos->e_magic != IMAGE_DOS_SIGNATURE || dos->e_lfanew <= 0 || dos->e_lfanew > 4096) return nullptr;
++  const auto nt = reinterpret_cast<const IMAGE_NT_HEADERS64 *>(
++      reinterpret_cast<const BYTE *>(module) + dos->e_lfanew);
++  if (nt->Signature != IMAGE_NT_SIGNATURE || nt->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR64_MAGIC ||
++      nt->FileHeader.TimeDateStamp != record.timestamp ||
++      nt->OptionalHeader.SizeOfImage != record.imageSize) return nullptr;
++  void *address = reinterpret_cast<BYTE *>(module) + record.rva;
++  MEMORY_BASIC_INFORMATION memory = {};
++  if (!VirtualQuery(address, &memory, sizeof(memory)) || memory.AllocationBase != module ||
++      memory.State != MEM_COMMIT || (memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
++      !(memory.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)))
++    return nullptr;
++  return address;
++}
++
++bool resolve_probe_targets(const OCATProbeTargets &record, DxgiTargets &targets)
++{
++  targets.present = resolve_probe_address(record.present);
++  targets.present1 = resolve_probe_address(record.present1);
++  targets.resize = resolve_probe_address(record.resize);
++  targets.resize1 = resolve_probe_address(record.resize1);
++  targets.release = resolve_probe_address(record.release);
++  return in_system_dxgi(targets.present) && in_system_dxgi(targets.present1) &&
++      in_system_dxgi(targets.resize) && in_system_dxgi(targets.resize1) && in_system_dxgi(targets.release);
++}
++}
++
++// Runs only in the controller's short-lived probe process, before game loading.
++extern "C" __declspec(dllexport) DWORD WINAPI BuildRivaCrossHookCache(LPVOID value)
++{
++  const DWORD controller = static_cast<DWORD>(reinterpret_cast<ULONG_PTR>(value));
++  wchar_t name[80];
++  swprintf_s(name, L"%ls%lu", RIVACROSS_OCAT_PROBE_PREFIX, controller);
++  HANDLE mapping = OpenFileMappingW(FILE_MAP_WRITE, FALSE, name);
++  if (!mapping) return 0;
++  auto view = static_cast<OCATProbeShared *>(MapViewOfFile(mapping, FILE_MAP_WRITE,
++      0, 0, sizeof(OCATProbeShared)));
++  if (!view || view->magic != RIVACROSS_OCAT_PROBE_MAGIC ||
++      view->version != RIVACROSS_OCAT_PROBE_VERSION || view->controllerPid != controller) {
++    if (view) UnmapViewOfFile(view);
++    CloseHandle(mapping);
++    return 0;
++  }
++  OCATProbeShared result = {};
++  result.magic = RIVACROSS_OCAT_PROBE_MAGIC;
++  result.version = RIVACROSS_OCAT_PROBE_VERSION;
++  result.controllerPid = controller;
++  LONG ready = 0;
++  HMODULE dxgi = LoadLibraryW(L"dxgi.dll");
++  const auto createFactory = dxgi ? reinterpret_cast<decltype(&CreateDXGIFactory1)>(
++      GetProcAddress(dxgi, "CreateDXGIFactory1")) : nullptr;
++  ComPtr<IDXGIFactory1> factory;
++  HWND window = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 16, 16,
++      nullptr, nullptr, nullptr, nullptr);
++  if (window && createFactory && SUCCEEDED(createFactory(IID_PPV_ARGS(&factory)))) {
++    DXGI_SWAP_CHAIN_DESC desc = {};
++    desc.BufferDesc.Width = desc.BufferDesc.Height = 16;
++    desc.BufferDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
++    desc.SampleDesc.Count = 1;
++    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
++    desc.BufferCount = 2;
++    desc.OutputWindow = window;
++    desc.Windowed = TRUE;
++    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
++    {
++      HMODULE d3d11 = LoadLibraryW(L"d3d11.dll");
++      const auto create = d3d11 ? reinterpret_cast<decltype(&D3D11CreateDevice)>(
++          GetProcAddress(d3d11, "D3D11CreateDevice")) : nullptr;
++      ComPtr<ID3D11Device> device;
++      ComPtr<IDXGISwapChain> chain;
++      if (create && SUCCEEDED(create(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
++          D3D11_CREATE_DEVICE_BGRA_SUPPORT, nullptr, 0, D3D11_SDK_VERSION, &device, nullptr, nullptr)) &&
++          SUCCEEDED(factory->CreateSwapChain(device.Get(), &desc, &chain)) &&
++          record_probe_targets(chain.Get(), result.d3d11)) ready |= 1;
++    }
++    {
++      HMODULE d3d12 = LoadLibraryW(L"d3d12.dll");
++      const auto create = d3d12 ? reinterpret_cast<decltype(&D3D12CreateDevice)>(
++          GetProcAddress(d3d12, "D3D12CreateDevice")) : nullptr;
++      ComPtr<ID3D12Device> device;
++      ComPtr<ID3D12CommandQueue> queue;
++      ComPtr<IDXGISwapChain> chain;
++      D3D12_COMMAND_QUEUE_DESC queueDesc = {};
++      queueDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
++      if (create && SUCCEEDED(create(nullptr, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&device))) &&
++          SUCCEEDED(device->CreateCommandQueue(&queueDesc, IID_PPV_ARGS(&queue))) &&
++          SUCCEEDED(factory->CreateSwapChain(queue.Get(), &desc, &chain)) &&
++          record_probe_targets(chain.Get(), result.d3d12) &&
++          record_probe_address(VTABLE(queue.Get())[10], result.execute)) ready |= 2;
++    }
++  }
++  factory.Reset();
++  if (window) DestroyWindow(window);
++  memcpy(view, &result, sizeof(result));
++  MemoryBarrier();
++  InterlockedExchange(&view->ready, ready);
++  UnmapViewOfFile(view);
++  CloseHandle(mapping);
++  return ready;
++}
++
++bool InstallCachedGraphicsHooks(DWORD controller)
++{
++  wchar_t name[80];
++  swprintf_s(name, L"%ls%lu", RIVACROSS_OCAT_PROBE_PREFIX, controller);
++  HANDLE mapping = OpenFileMappingW(FILE_MAP_READ, FALSE, name);
++  if (!mapping) { g_messageLog.LogWarning("dxgi", "External graphics cache unavailable"); return false; }
++  auto view = static_cast<const OCATProbeShared *>(MapViewOfFile(mapping, FILE_MAP_READ,
++      0, 0, sizeof(OCATProbeShared)));
++  OCATProbeShared cache = {};
++  if (view) { MemoryBarrier(); memcpy(&cache, view, sizeof(cache)); UnmapViewOfFile(view); }
++  CloseHandle(mapping);
++  if (cache.magic != RIVACROSS_OCAT_PROBE_MAGIC || cache.version != RIVACROSS_OCAT_PROBE_VERSION ||
++      cache.controllerPid != controller || !(cache.ready & 3)) return false;
++  bool installed = false;
++  DxgiTargets targets;
++  if ((cache.ready & 1) && resolve_probe_targets(cache.d3d11, targets)) {
++    installed = install_late_targets(targets, false);
++    g_messageLog.LogInfo("dxgi", installed ? "Cached D3D11 hooks installed" : "Cached D3D11 hooks failed");
++  }
++  void *execute = resolve_probe_address(cache.execute);
++  if ((cache.ready & 2) && execute && resolve_probe_targets(cache.d3d12, targets)) {
++    const bool queue = GameOverlay::install_hook(execute,
++        reinterpret_cast<GameOverlay::hook::address>(&LateExecuteCommandLists));
++    const bool success = queue && install_late_targets(targets, true);
++    installed = success || installed;
++    g_messageLog.LogInfo("dxgi", success ? "Cached D3D12 hooks installed" : "Cached D3D12 hooks failed");
++  } else if (cache.ready & 2) {
++    g_messageLog.LogWarning("dxgi", "Cached D3D12 module identity unavailable or mismatched; no target device probe");
++  }
++  return installed;
++}
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index 793a6b8..ec16917 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -55,6 +55,7 @@ bool g_uwpApp = false;
+ extern bool InstallLateD3D11Hook();
+ extern bool InstallLateD3D12Hook();
+ extern void InstallEarlyFactoryHooks();
++extern bool InstallCachedGraphicsHooks(DWORD controllerPid);
+ bool StartRivaCrossRenderer();
+ 
+ namespace {
+@@ -237,12 +238,9 @@ DWORD WINAPI InitializeRivaCrossRenderer(LPVOID)
+   // Avoid creating a temporary D3D12 device inside the target process.
+   GameOverlay::register_module(std::wstring(systemPath) + L"\\dxgi.dll");
+   GameOverlay::register_additional_module(L"d3d12.dll");
+-  if (watchView->mode != OCATWatchLaunch)
+-    InstallLateD3D11HookThread(nullptr);
+-  else {
+-    InstallEarlyFactoryHooks();
+-    g_messageLog.LogInfo("dxgi", "Startup watcher using creation hooks; late device probe skipped");
+-  }
++  InstallCachedGraphicsHooks(watchView->controllerPid);
++  InstallEarlyFactoryHooks();
++  g_messageLog.LogInfo("dxgi", "Using external graphics cache and creation hooks; target device probe skipped");
+   return 0;
+ }
+ 

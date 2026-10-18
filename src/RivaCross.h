@@ -56,11 +56,14 @@ typedef struct HotkeyState {
 	bool visible;          // current crosshair visibility
 	bool prevAsyncState;   // previous frame key state (for Toggle edge detection)
 	bool threadRunning;    // signal to hotkey polling thread to stop
-	// Master toggle: when disabled, main hotkey is ignored
+	// Master toggle binding and current state
 	int masterKeyCode;           // VK code for master toggle (0 = disabled)
 	int masterModifierMask;      // modifiers for master toggle
-	bool masterEnabled;          // current master state (true = hotkeys work)
+	bool masterEnabled;          // GUI crosshair gate (false = forced hidden)
 	bool masterPrevAsyncState;   // edge detection for master toggle
+	int secondaryKeyCode;        // optional alternative to the main hotkey
+	int secondaryModifierMask;
+	bool secondaryPrevAsyncState;
 } HotkeyState;
 
 typedef struct CrossActionArgs {

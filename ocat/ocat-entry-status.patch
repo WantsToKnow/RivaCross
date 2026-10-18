@@ -1,0 +1,196 @@
+diff --git a/GameOverlay/d3d/source/OCATStatus.h b/GameOverlay/d3d/source/OCATStatus.h
+index 092fc69..e7dc9c2 100644
+--- a/GameOverlay/d3d/source/OCATStatus.h
++++ b/GameOverlay/d3d/source/OCATStatus.h
+@@ -4,13 +4,19 @@
+ 
+ // Per-process renderer progress, read by RivaCrossOCAT.exe.
+ #define RIVACROSS_OCAT_STATUS_MAGIC 0x53544352u
+-#define RIVACROSS_OCAT_STATUS_VERSION 1u
++#define RIVACROSS_OCAT_STATUS_VERSION 2u
++#define RIVACROSS_OCAT_STATUS_PREFIX L"Local\\RivaCrossOCATStatusV2-"
+ 
+ struct OCATStatusShared {
+   DWORD magic;
+   DWORD version;
+   volatile LONG stage; // 1: DLL code ran, 2: Present reached, 3: draw commands issued
+   DWORD api;            // 0: unknown, 11: D3D11, 12: D3D12
++  volatile LONG callbackSeen;
++  DWORD authorizationError;
++  DWORD startError;
+ };
+ 
++static_assert(sizeof(OCATStatusShared) == 28, "OCAT status protocol size changed");
++
+ void UpdateRivaCrossStatus(LONG stage, DWORD api = 0);
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+index ec16917..1e18464 100644
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -64,16 +64,18 @@ HANDLE watchMapping = nullptr;
+ const OCATWatchShared* watchView = nullptr;
+ wchar_t processPath[MAX_PATH] = {};
+ volatile LONG rendererStarted = 0;
++DWORD watchOpenError = ERROR_SUCCESS;
+ 
+ BOOL CALLBACK OpenWatch(PINIT_ONCE, PVOID, PVOID*)
+ {
+   DWORD length = GetModuleFileNameW(nullptr, processPath, MAX_PATH);
+-  if (!length || length >= MAX_PATH) return FALSE;
++  if (!length || length >= MAX_PATH) { watchOpenError = ERROR_BAD_PATHNAME; return FALSE; }
+   watchMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, RIVACROSS_OCAT_WATCH_NAME);
+-  if (!watchMapping) return FALSE;
++  if (!watchMapping) { watchOpenError = GetLastError(); return FALSE; }
+   watchView = static_cast<const OCATWatchShared*>(MapViewOfFile(
+       watchMapping, FILE_MAP_READ, 0, 0, sizeof(OCATWatchShared)));
+   if (!watchView) {
++    watchOpenError = GetLastError();
+     CloseHandle(watchMapping);
+     watchMapping = nullptr;
+     return FALSE;
+@@ -82,26 +84,35 @@ BOOL CALLBACK OpenWatch(PINIT_ONCE, PVOID, PVOID*)
+ }
+ }
+ 
+-bool RivaCrossWatchAllowed(bool remoteOnly = false)
++bool CheckRivaCrossWatch(bool remoteOnly, DWORD* error)
+ {
+-  if (!InitOnceExecuteOnce(&watchOnce, OpenWatch, nullptr, nullptr)) return false;
++  const auto reject = [error](DWORD reason) { if (error) *error = reason; return false; };
++  if (!InitOnceExecuteOnce(&watchOnce, OpenWatch, nullptr, nullptr)) return reject(watchOpenError);
+   const LONG sequence = watchView->sequence;
+-  if (sequence & 1) return false;
++  if (sequence & 1) return reject(ERROR_BUSY);
+   MemoryBarrier();
+   OCATWatchShared snapshot;
+   memcpy(&snapshot, watchView, sizeof(snapshot));
+   MemoryBarrier();
+-  if (sequence != watchView->sequence) return false;
++  if (sequence != watchView->sequence) return reject(ERROR_BUSY);
+   const DWORD pid = GetCurrentProcessId();
+-  return snapshot.magic == RIVACROSS_OCAT_WATCH_MAGIC &&
+-      snapshot.version == RIVACROSS_OCAT_WATCH_VERSION &&
+-      snapshot.controllerPid != pid && snapshot.heartbeat &&
+-      (DWORD)(GetTickCount() - (DWORD)snapshot.heartbeat) < 3000 &&
+-      snapshot.mode >= OCATWatchLaunch && snapshot.mode <= OCATWatchRemote &&
+-      (!remoteOnly || (snapshot.mode == OCATWatchRemote && snapshot.targetPid == pid)) &&
+-      (!snapshot.targetPid || snapshot.targetPid == pid) &&
+-      snapshot.executable[MAX_PATH - 1] == 0 && snapshot.executable[0] &&
+-      _wcsicmp(processPath, snapshot.executable) == 0;
++  if (snapshot.magic != RIVACROSS_OCAT_WATCH_MAGIC ||
++      snapshot.version != RIVACROSS_OCAT_WATCH_VERSION ||
++      snapshot.executable[MAX_PATH - 1] != 0 || !snapshot.executable[0] ||
++      snapshot.mode < OCATWatchLaunch || snapshot.mode > OCATWatchRemote)
++    return reject(ERROR_INVALID_DATA);
++  if (!snapshot.heartbeat || (DWORD)(GetTickCount() - (DWORD)snapshot.heartbeat) >= 3000)
++    return reject(ERROR_TIMEOUT);
++  if (snapshot.controllerPid == pid || (snapshot.targetPid && snapshot.targetPid != pid) ||
++      (remoteOnly && (snapshot.mode != OCATWatchRemote || snapshot.targetPid != pid)) ||
++      _wcsicmp(processPath, snapshot.executable) != 0) return reject(ERROR_NOT_FOUND);
++  if (error) *error = ERROR_SUCCESS;
++  return true;
++}
++
++bool RivaCrossWatchAllowed(bool remoteOnly = false)
++{
++  return CheckRivaCrossWatch(remoteOnly, nullptr);
+ }
+ 
+ namespace {
+@@ -114,10 +125,11 @@ OCATStatusShared* statusView = nullptr;
+ BOOL CALLBACK InitStatus(PINIT_ONCE, PVOID, PVOID*)
+ {
+   wchar_t name[80];
+-  swprintf_s(name, L"Local\\RivaCrossOCATStatusV1-%lu", GetCurrentProcessId());
++  swprintf_s(name, L"%ls%lu", RIVACROSS_OCAT_STATUS_PREFIX, GetCurrentProcessId());
+   statusMapping = CreateFileMappingW(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE,
+                                     0, sizeof(OCATStatusShared), name);
+   if (!statusMapping) return FALSE;
++  const bool existing = GetLastError() == ERROR_ALREADY_EXISTS;
+   statusView = static_cast<OCATStatusShared*>(MapViewOfFile(
+       statusMapping, FILE_MAP_WRITE, 0, 0, sizeof(OCATStatusShared)));
+   if (!statusView) {
+@@ -125,10 +137,21 @@ BOOL CALLBACK InitStatus(PINIT_ONCE, PVOID, PVOID*)
+     statusMapping = nullptr;
+     return FALSE;
+   }
++  if (existing) {
++    if (statusView->magic == RIVACROSS_OCAT_STATUS_MAGIC &&
++        statusView->version == RIVACROSS_OCAT_STATUS_VERSION) return TRUE;
++    UnmapViewOfFile(statusView);
++    statusView = nullptr;
++    CloseHandle(statusMapping);
++    statusMapping = nullptr;
++    return FALSE;
++  }
+   statusView->magic = RIVACROSS_OCAT_STATUS_MAGIC;
+   statusView->version = RIVACROSS_OCAT_STATUS_VERSION;
+   statusView->api = 0;
+-  InterlockedExchange(&statusView->stage, 1);
++  statusView->callbackSeen = 0;
++  statusView->authorizationError = statusView->startError = 0;
++  InterlockedExchange(&statusView->stage, 0);
+   return TRUE;
+ }
+ }
+@@ -147,6 +170,25 @@ void UpdateRivaCrossStatus(LONG stage, DWORD api)
+   ReleaseSRWLockExclusive(&statusLock);
+ }
+ 
++void RecordHookEntry(DWORD error)
++{
++  if (!InitOnceExecuteOnce(&statusOnce, InitStatus, nullptr, nullptr)) return;
++  if (statusView->callbackSeen && statusView->authorizationError == error) return;
++  AcquireSRWLockExclusive(&statusLock);
++  statusView->authorizationError = error;
++  MemoryBarrier();
++  InterlockedExchange(&statusView->callbackSeen, 1);
++  ReleaseSRWLockExclusive(&statusLock);
++}
++
++void RecordStartError(DWORD error)
++{
++  if (!InitOnceExecuteOnce(&statusOnce, InitStatus, nullptr, nullptr)) return;
++  AcquireSRWLockExclusive(&statusLock);
++  statusView->startError = error;
++  ReleaseSRWLockExclusive(&statusLock);
++}
++
+ DWORD WINAPI InstallLateD3D11HookThread(LPVOID)
+ {
+   UpdateRivaCrossStatus(1);
+@@ -164,7 +206,14 @@ GlobalHookProc(int code, WPARAM wParam, LPARAM lParam)
+ {
+   // A global hook can be mapped into unrelated GUI processes. Do no graphics
+   // initialization there. Negative hook codes must always be forwarded.
+-  if (code >= 0 && RivaCrossWatchAllowed()) StartRivaCrossRenderer();
++  if (code >= 0) {
++    DWORD error = ERROR_SUCCESS;
++    const bool allowed = CheckRivaCrossWatch(false, &error);
++    // Entry and authorization are separate receipts. No renderer is started
++    // for unselected processes, even though Windows can map the global hook.
++    RecordHookEntry(error);
++    if (allowed) StartRivaCrossRenderer();
++  }
+   return CallNextHookEx(NULL, code, wParam, lParam);
+ }
+ 
+@@ -252,15 +301,18 @@ bool StartRivaCrossRenderer()
+   HMODULE pinned = nullptr;
+   if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+       GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&GlobalHookProc), &pinned)) {
++    RecordStartError(GetLastError());
+     InterlockedExchange(&rendererStarted, 0);
+     return false;
+   }
+   HANDLE worker = CreateThread(nullptr, 0, InitializeRivaCrossRenderer, nullptr, 0, nullptr);
+   if (worker) {
++    RecordStartError(ERROR_SUCCESS);
+     UpdateRivaCrossStatus(1);
+     CloseHandle(worker);
+     return true;
+   }
++  RecordStartError(GetLastError());
+   InterlockedExchange(&rendererStarted, 0);
+   return false;
+ }

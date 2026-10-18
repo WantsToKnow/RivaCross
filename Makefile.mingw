@@ -10,7 +10,10 @@ all: RivaCross.exe
 RivaCross.exe: $(GUI_OBJS)
 	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS)
 
-ocat: RivaCrossOCAT.exe
+ocat: RivaCrossOCAT.exe ocat/bin/RivaCrossOCATHook64.dll
+
+ocat/bin/RivaCrossOCATHook64.dll: src/OCATHook.cpp src/OCATWatchShared.h src/OCATStatus.h
+	$(CXX) -Os -shared -static-libgcc -static-libstdc++ -s -o $@ src/OCATHook.cpp -luser32
 
 RivaCrossOCAT.exe: $(OCAT_OBJS)
 	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS)
@@ -23,8 +26,10 @@ RivaCrossConsole.exe: $(CONSOLE_OBJS)
 obj/%.o: src/%.cpp
 	$(CXX) -c $(CXXFLAGS) -o $@ $<
 
-obj/OCATMain.o: src/Main.cpp src/OCATShared.h src/OCATCrosshairShared.h
+obj/OCATMain.o: src/Main.cpp src/OCATShared.h src/OCATCrosshairShared.h src/OCATStatus.h src/OCATWatchShared.h src/OCATProbeShared.h
 	$(CXX) -c $(CXXFLAGS) -DRIVACROSS_OCAT -o $@ src/Main.cpp
+
+obj/OCATShared.o: src/OCATStatus.h src/OCATWatchShared.h src/OCATProbeShared.h
 
 clean:
 	-rm -f RivaCross.exe RivaCrossOCAT.exe RivaCrossConsole.exe obj/*.o

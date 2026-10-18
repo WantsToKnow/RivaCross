@@ -1,0 +1,315 @@
+diff --git a/GameOverlay/d3d/source/main.cpp b/GameOverlay/d3d/source/main.cpp
+--- a/GameOverlay/d3d/source/main.cpp
++++ b/GameOverlay/d3d/source/main.cpp
+@@ -36,6 +36,7 @@
+ #include "Overlay/VK_Environment.h"
+ #include "Utility/StringUtils.h"
+ #include "OCATStatus.h"
++#include "OCATWatchShared.h"
+ 
+ #include <psapi.h>
+ #include <assert.h>
+@@ -53,6 +54,53 @@
+ bool g_uwpApp = false;
+ extern bool InstallLateD3D11Hook();
+ extern bool InstallLateD3D12Hook();
++void StartRivaCrossRenderer();
++
++namespace {
++INIT_ONCE watchOnce = INIT_ONCE_STATIC_INIT;
++HANDLE watchMapping = nullptr;
++const OCATWatchShared* watchView = nullptr;
++wchar_t processPath[MAX_PATH] = {};
++volatile LONG rendererStarted = 0;
++
++BOOL CALLBACK OpenWatch(PINIT_ONCE, PVOID, PVOID*)
++{
++  DWORD length = GetModuleFileNameW(nullptr, processPath, MAX_PATH);
++  if (!length || length >= MAX_PATH) return FALSE;
++  watchMapping = OpenFileMappingW(FILE_MAP_READ, FALSE, RIVACROSS_OCAT_WATCH_NAME);
++  if (!watchMapping) return FALSE;
++  watchView = static_cast<const OCATWatchShared*>(MapViewOfFile(
++      watchMapping, FILE_MAP_READ, 0, 0, sizeof(OCATWatchShared)));
++  if (!watchView) {
++    CloseHandle(watchMapping);
++    watchMapping = nullptr;
++    return FALSE;
++  }
++  return TRUE;
++}
++}
++
++bool RivaCrossWatchAllowed(bool remoteOnly = false)
++{
++  if (!InitOnceExecuteOnce(&watchOnce, OpenWatch, nullptr, nullptr)) return false;
++  const LONG sequence = watchView->sequence;
++  if (sequence & 1) return false;
++  MemoryBarrier();
++  OCATWatchShared snapshot;
++  memcpy(&snapshot, watchView, sizeof(snapshot));
++  MemoryBarrier();
++  if (sequence != watchView->sequence) return false;
++  const DWORD pid = GetCurrentProcessId();
++  return snapshot.magic == RIVACROSS_OCAT_WATCH_MAGIC &&
++      snapshot.version == RIVACROSS_OCAT_WATCH_VERSION &&
++      snapshot.controllerPid != pid && snapshot.heartbeat &&
++      (DWORD)(GetTickCount() - (DWORD)snapshot.heartbeat) < 3000 &&
++      snapshot.mode >= OCATWatchLaunch && snapshot.mode <= OCATWatchRemote &&
++      (!remoteOnly || (snapshot.mode == OCATWatchRemote && snapshot.targetPid == pid)) &&
++      (!snapshot.targetPid || snapshot.targetPid == pid) &&
++      snapshot.executable[MAX_PATH - 1] == 0 && snapshot.executable[0] &&
++      _wcsicmp(processPath, snapshot.executable) == 0;
++}
+ 
+ namespace {
+ // Process lifetime: in-flight Present callbacks may outlive hook removal.
+@@ -112,7 +160,9 @@
+ extern "C" __declspec(dllexport) LRESULT CALLBACK
+ GlobalHookProc(int code, WPARAM wParam, LPARAM lParam)
+ {
+-  UpdateRivaCrossStatus(1);
++  // A global hook can be mapped into unrelated GUI processes. Do no graphics
++  // initialization there. Negative hook codes must always be forwarded.
++  if (code >= 0 && RivaCrossWatchAllowed()) StartRivaCrossRenderer();
+   return CallNextHookEx(NULL, code, wParam, lParam);
+ }
+ 
+@@ -168,82 +218,63 @@
+   OverlayMessage::PostFrontendMessage(sharedFrontendWindow, messageType, GetCurrentProcessId());
+ }
+ 
+-BOOL APIENTRY DllMain(HMODULE hModule, DWORD fdwReason, LPVOID lpReserved)
+-{
+-  if (!g_fileDirectory.Initialize())
+-  {
+-    return FALSE;
+-  }
+-
+-  UNREFERENCED_PARAMETER(lpReserved);
+-  switch (fdwReason)
+-  {
+-  case DLL_PROCESS_ATTACH:
+-  {
++DWORD WINAPI InitializeRivaCrossRenderer(LPVOID)
++{
++  if (!RivaCrossWatchAllowed() || !g_fileDirectory.Initialize()) {
++    InterlockedExchange(&rendererStarted, 0);
++    return 0;
++  }
++  g_denyList.Load();
++  const std::wstring processName = GetProcessNameFromHandle(GetCurrentProcess());
++  if (processName.empty() || g_denyList.Contains(processName)) return 0;
++  g_messageLog.SetVersion(g_denyList.GetVersion());
++  InitLogging();
++  SendDllStateMessage(OverlayMessageType::AttachDll);
++  wchar_t systemPath[MAX_PATH];
++  if (!GetSystemDirectoryW(systemPath, MAX_PATH)) return 0;
++  // Creation hooks cover future devices. The probes cover a device/swapchain
++  // created while this worker was starting; no GPU work runs in a CBT callback.
++  GameOverlay::register_module(std::wstring(systemPath) + L"\\dxgi.dll");
++  GameOverlay::register_additional_module(L"d3d12.dll");
++  InstallLateD3D11HookThread(nullptr);
++  return 0;
++}
++
++void StartRivaCrossRenderer()
++{
++  if (!RivaCrossWatchAllowed() ||
++      InterlockedCompareExchange(&rendererStarted, 1, 0) != 0) return;
++  // Retain code before queuing a worker. Unhooking must not unload its entry.
++  HMODULE pinned = nullptr;
++  if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
++      GET_MODULE_HANDLE_EX_FLAG_PIN, reinterpret_cast<LPCWSTR>(&GlobalHookProc), &pinned)) {
++    InterlockedExchange(&rendererStarted, 0);
++    return;
++  }
++  UpdateRivaCrossStatus(1);
++  HANDLE worker = CreateThread(nullptr, 0, InitializeRivaCrossRenderer, nullptr, 0, nullptr);
++  if (worker) CloseHandle(worker);
++  else InterlockedExchange(&rendererStarted, 0);
++}
++
++DWORD WINAPI StartRemoteRenderer(LPVOID)
++{
++  StartRivaCrossRenderer();
++  return 0;
++}
++
++BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID)
++{
++  if (reason == DLL_PROCESS_ATTACH) {
+     g_module_handle = hModule;
+     DisableThreadLibraryCalls(hModule);
+-
+-    // Register modules for hooking
+-    wchar_t system_path_buffer[MAX_PATH];
+-    GetSystemDirectoryW(system_path_buffer, MAX_PATH);
+-    const std::wstring system_path(system_path_buffer);
+-
+-    g_denyList.Load();
+-    const std::wstring processName = GetProcessNameFromHandle(GetCurrentProcess());
+-    if (!processName.empty())
+-    {
+-      if (!g_denyList.Contains(processName))
+-      {
+-        g_messageLog.SetVersion(g_denyList.GetVersion());
+-        InitLogging();
+-        SendDllStateMessage(OverlayMessageType::AttachDll);
+-
+-        // DXGI
+-        wchar_t system_path_buffer[MAX_PATH];
+-        GetSystemDirectoryW(system_path_buffer, MAX_PATH);
+-        const std::wstring system_path(system_path_buffer);
+-        if (!GameOverlay::register_module(system_path + L"\\dxgi.dll"))
+-        {
+-          g_messageLog.LogError("GameOverlay", "Failed to register module for DXGI");
+-        }
+-        
+-        // D3D12
+-        GameOverlay::register_additional_module(L"d3d12.dll");
+-
+-        // Existing swapchains cannot be replaced by the factory creation hook.
+-        // A worker avoids creating a D3D device while the loader lock is held.
+-        g_messageLog.LogInfo("dxgi", "Starting late hook worker");
+-        HANDLE lateHookThread = CreateThread(nullptr, 0, InstallLateD3D11HookThread,
+-                                             nullptr, 0, nullptr);
+-        if (lateHookThread) CloseHandle(lateHookThread);
+-        else g_messageLog.LogError("dxgi", "Late hook worker could not start", GetLastError());
+-
+-      }
+-      else
+-      {
+-        g_messageLog.LogInfo("GameOverlay", L"Process '" + processName + L"' is on denylist -> Ignore");
+-      }
+-      
++    // Compatibility with the explicit remote LoadLibrary helper: its reference
++    // keeps this DLL loaded until this worker can pin it. Global/CBT loads do
++    // not start workers here; they initialize only in an authorized callback.
++    if (RivaCrossWatchAllowed(true)) {
++      HANDLE worker = CreateThread(nullptr, 0, StartRemoteRenderer, nullptr, 0, nullptr);
++      if (worker) CloseHandle(worker);
+     }
+-    break;
+-  }
+-  case DLL_PROCESS_DETACH:
+-  {
+-    if (lpReserved == NULL)
+-    {
+-      g_messageLog.LogInfo("GameOverlay", L"Detach because DLL load failed or FreeLibrary called");
+-    }
+-    else
+-    {
+-      g_messageLog.LogInfo("GameOverlay", L"Detach because process is terminating");
+-    }
+-
+-    // Uninstall and clean up all hooks before unloading
+-    SendDllStateMessage(OverlayMessageType::DetachDll);
+-    GameOverlay::uninstall_hook();
+-    break;
+-  }
+-  }
+-
++  }
+   return TRUE;
+ }
+diff --git a/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
+--- a/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d11_renderer.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "d3d11_renderer.hpp"
+ #include "../OCATStatus.h"
++extern bool RivaCrossWatchAllowed(bool remoteOnly = false);
+ #include <assert.h>
+ #include <vector>
+ 
+@@ -173,6 +174,7 @@
+ 
+ bool d3d11_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+ {
++  if (!RivaCrossWatchAllowed()) return false;
+   UpdateRivaCrossStatus(2, 11);
+   if (status == InitializationStatus::UNINITIALIZED) {
+     return false;
+diff --git a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+--- a/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
++++ b/GameOverlay/d3d/source/d3d/d3d12_renderer.cpp
+@@ -25,6 +25,7 @@
+ 
+ #include "d3d12_renderer.hpp"
+ #include "../OCATStatus.h"
++extern bool RivaCrossWatchAllowed(bool remoteOnly = false);
+ #include <assert.h>
+ #include "../deps/d3dx12/d3dx12.h"
+ 
+@@ -141,6 +142,7 @@
+ 
+ bool d3d12_renderer::on_present(int backBufferIndex, bool lagIndicatorState)
+ {
++  if (!RivaCrossWatchAllowed()) return false;
+   UpdateRivaCrossStatus(2, 12);
+   if (!initSuccessfull_) {
+     return false;
+diff --git a/GameOverlay/d3d/source/d3d/dxgi.cpp b/GameOverlay/d3d/source/d3d/dxgi.cpp
+--- a/GameOverlay/d3d/source/d3d/dxgi.cpp
++++ b/GameOverlay/d3d/source/d3d/dxgi.cpp
+@@ -32,6 +32,7 @@
+ #include "d3d11_renderer.hpp"
+ #include "d3d12_renderer.hpp"
+ #include "../OCATStatus.h"
++extern bool RivaCrossWatchAllowed(bool remoteOnly = false);
+ #include <cwchar>
+ #include <mutex>
+ #include <unordered_map>
+@@ -420,6 +421,7 @@
+ 
+ void draw_late_overlay(IDXGISwapChain *chain, UINT flags)
+ {
++  if (!RivaCrossWatchAllowed()) return;
+   static std::once_flag firstPresent;
+   std::call_once(firstPresent, [] {
+     g_messageLog.LogInfo("dxgi", "Late DXGI Present hook reached");
+diff --git a/GameOverlay/d3d/source/hook_manager.cpp b/GameOverlay/d3d/source/hook_manager.cpp
+--- a/GameOverlay/d3d/source/hook_manager.cpp
++++ b/GameOverlay/d3d/source/hook_manager.cpp
+@@ -840,8 +840,9 @@
+     return false;
+   }
+ 
+-  bool register_module(const std::wstring &target_path)  // Not thread-safe
+-  {
++  bool register_module(const std::wstring &target_path)
++  {
++    const critical_section::lock lock(s_cs);
+     int numModulesRegistered = 0;
+     g_messageLog.LogInfo("register_module", L"Register module for " + target_path);
+ 
+@@ -902,6 +903,7 @@
+ 
+   void register_additional_module(const std::wstring &module_name)
+   {
++    const critical_section::lock lock(s_cs);
+     HMODULE handle = nullptr;
+     GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_PIN, module_name.c_str(), &handle);
+ 
+diff --git a/GameOverlay/d3d/source/OCATWatchShared.h b/GameOverlay/d3d/source/OCATWatchShared.h
+new file mode 100644
+--- /dev/null
++++ b/GameOverlay/d3d/source/OCATWatchShared.h
+@@ -0,0 +1,16 @@
++#pragma once
++#include <windows.h>
++
++#define RIVACROSS_OCAT_WATCH_NAME L"Local\\RivaCrossOCATWatchV1"
++#define RIVACROSS_OCAT_WATCH_MAGIC 0x57414352u
++#define RIVACROSS_OCAT_WATCH_VERSION 1u
++enum OCATWatchMode { OCATWatchLaunch = 1, OCATWatchThread, OCATWatchRemote };
++
++// One selected executable. A zero PID allows future instances of that file.
++struct OCATWatchShared {
++	volatile LONG sequence;
++	DWORD magic, version, controllerPid;
++	volatile LONG heartbeat;
++	DWORD mode, targetPid;
++	wchar_t executable[MAX_PATH];
++};

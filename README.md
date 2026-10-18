@@ -37,8 +37,15 @@ Usage
 Use **Load** to switch presets and **Save As** to create one. The default preset
 is `config/default.txt` beside the executable. The window also provides
 **Show/Hide**, a clipboard clear action, and an option to leave the crosshair
-visible after exit. Configure a main hotkey in hold or toggle mode and an
-optional master toggle hotkey in the same window.
+visible after exit. Configure a main hotkey and an optional **Hotkey 2 (OR)**
+in the same window. Both use the selected hold or toggle mode: hold either key
+to show the crosshair, or press either key to toggle it. **Master toggle** is
+the crosshair's main switch: OFF forces it hidden; ON resets it to visible
+in toggle mode, even if a hotkey hid it before. Hold mode always requires
+either hotkey to be held, including immediately after master ON.
+While master is OFF, both hotkeys and
+**Show/Hide** cannot show the crosshair. Each binding supports its own
+Ctrl/Shift/Alt modifiers.
 Click a hotkey field and press a key or mouse button (left, right, middle, or
 side); Esc cancels and Backspace clears it.
 Keep the window open (it can be minimized) to use hotkeys. Closing it releases
@@ -54,8 +61,41 @@ Optional OCAT build
 `RivaCrossOCAT.exe` publishes the same presets and hotkey visibility to a named
 shared-memory block for a compatible, modified OCAT game overlay. It does not
 use RTSS. Stock OCAT does not read this block or draw the custom crosshair.
-With `ocat/bin/gameoverlay64-flip.dll` and `ocat/bin/DLLInjector64.exe` beside the
-GUI, click **Launch game...** and select a 64-bit game executable. The GUI
+With `ocat/bin/gameoverlay64-flip.dll` beside the GUI, click **Watch launch...**
+and select the actual 64-bit game EXE (not Steam/WeGame). Keep the GUI open,
+then start the game normally from its platform. No per-PID attach is needed.
+The selection is saved in `config/ocat-watch.ini`; the next GUI launch restores
+the watcher. Choose **Stop watching** to disable it and stop rendering. If the
+game was already running, restart it to check the startup path.
+
+Before arming a hook, the GUI runs a separate graphics probe with a 7-second
+deadline. It caches DXGI/D3D12 method offsets and module identities. The target
+checks the module path, PE timestamp, image size, and executable memory before
+using those offsets. It creates no temporary D3D device inside the game. A
+different runtime module causes that cached path to be skipped.
+
+The watcher registers an x64 global `WH_CBT` hook for the current desktop through
+`ocat/bin/RivaCrossOCATHook64.dll`. This small entry imports only KERNEL32 and
+USER32, with its runtime linked statically (about 103 KiB). Windows may map it
+into other desktop programs, but the callback checks the selected full executable
+path before a worker loads `gameoverlay64-flip.dll`. The worker handles
+graphics initialization; the callback does not create graphics devices. The
+renderer checks the GUI's heartbeat before each draw and stops on revocation or
+after 3 seconds without a heartbeat. Loaded rendering code stays until the game
+exits. Only one executable is selected at a time; the GUI tracks one instance.
+If a newly found window has no DLL acknowledgement, the watcher also tries a
+thread-specific `WH_CALLWNDPROC` hook and one `WM_NULL` message (500 ms timeout).
+The startup hook remains installed for later instances. A delivered message
+still does not confirm that Windows ran our callback inside that game.
+The V2 status protocol separately records callback execution, control-read
+errors, renderer-load/start errors, Present, and draw submission. Local D3D12
+startup and running-window checks pass with the split entry. In the 2026-10-17
+Apex check, TEST remained absent; a kernel image trace recorded 135 image loads
+for the game PID, including Steam's overlay, but neither RivaCross DLL. Apex
+compatibility remains unresolved.
+
+The optional `ocat/bin/DLLInjector64.exe` supports the older explicit paths.
+Click **Launch game...** and select a 64-bit game executable. The GUI
 starts it suspended, asks OCAT's injector to load the modified overlay, then
 resumes it even if injection fails. Games that require their own launcher may
 reject direct EXE launch.
@@ -64,16 +104,25 @@ For an already-running, unprotected D3D11 or D3D12 program, click
 **Attach running...**. The picker lists visible 64-bit processes with the
 required process rights that have loaded `d3d11.dll` or `d3d12.dll`. It also
 shows accessible processes whose module scan failed, marked as unverified.
-Select one and look for `TEST` in its window. D3D12 late attachment is
+Select one and check for the TEST marker and crosshair in its window. D3D12 late attachment is
 experimental; unverified entries require a warning confirmation. This list
 does not certify that the DLL can load or render. The injector's success report
-confirms only that remote `LoadLibraryW` returned a nonzero result; it does not
+confirms only a load or renderer-start request; it does not
 prove that the crosshair rendered. The late D3D12 renderer stops drawing when it
 observes multiple direct queues for one device or a `ResizeBuffers1` call that
 supplies Present queues, because it cannot then identify the right queue.
-The bundled renderer does not automatically inject into child processes; only
-the PID you select is targeted. Injection and renderer diagnostics are written
+The bundled renderer does not automatically inject into child processes.
+Manual attachment authorizes only the PID you select. Diagnostics are written
 under `Documents\OCAT\Logs` in `PresentMonLog.txt` and `GameOverlayLog.txt`.
+
+**Attach window...** installs a `WH_CALLWNDPROC` hook on a selected visible
+64-bit window thread. It sends one `WM_NULL` wake message with a 500 ms timeout,
+so this path can run the hook without waiting for a new CBT event. It requires
+neither remote process-memory writes nor an external graphics-module scan.
+Keep the GUI open while using this path; closing it removes the hook. A delivered
+message confirms only the wake request; the per-PID status must still report DLL
+execution and drawing. **Watch launch...** provides the RTSS-style desktop-wide
+CBT entry before the game starts.
 The GUI limits each injector attempt to 8 seconds. In a local D3D12 test,
 RTSS's loaded `RTSSHooks64.dll` prevented OCAT's late Present hook from running;
 the same test initialized OCAT rendering after RTSS was closed. The running-app
@@ -100,13 +149,22 @@ actual game-image pixel per click. The signed Fine X/Y offsets are saved with
 the preset; existing presets start with zero offsets.
 Restart a game that already loaded an older OCAT DLL before testing the new build.
 
-The OCAT DLL currently draws a small `TEST` label without a background in the
-top-right corner of the game image, even if the crosshair is hidden.
-This temporary marker confirms only that the DLL reached the game's renderer.
-It stays visible until the target program exits, including after the GUI closes.
-Starting a game from Steam alone does not load this DLL. CS2 is excluded from
-both OCAT injection buttons. [Valve says targeted third-party injection into
+After launch or attach, the GUI reports progress for the selected PID: DLL worker
+started, DXGI Present reached, and draw commands issued. The last receipt
+confirms work in the game's rendering path, not that the crosshair was visible
+on screen or that Independent Flip was retained. The small `TEST` marker stays
+in the top-right corner while rendering is active, even when the crosshair is hidden.
+Starting from Steam is supported when **Watch launch...** has armed that EXE.
+Select the actual game's executable, not its launcher; the window title shows the
+full watched path. If the game is already running, restart it after arming the watcher.
+CS2 is excluded from all OCAT loading paths. [Valve says targeted third-party injection into
 CS2 Trusted Mode can risk a VAC ban](https://help.steampowered.com/en/faqs/view/09A0-4879-4353-EF95).
+
+`tests/startup_watch_check.cpp` and its PowerShell runner check startup loading and
+attachment to an already initialized window (`-WindowHook`), including
+actual green crosshair and yellow TEST pixels, exclusion of an unselected EXE, and stopping
+after revocation, for both D3D11 and D3D12. Each process has a 7.5-second hard
+deadline; the runner adds an 8-second limit. See [OCAT build notes](ocat/BUILD.md).
 
 For bug reports or feature suggestions please use the 
 [Issues section](https://github.com/irseny/RivaCross/issues).

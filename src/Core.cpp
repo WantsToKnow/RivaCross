@@ -90,6 +90,7 @@ int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 	RTSSCrossConfig parsed = {};
 	char line[128];
 	int hotkey[5] = {};
+	int secondaryHotkey[2] = {};
 	int hotkeyLines = 0;
 	int result = -3;
 	do {
@@ -121,8 +122,14 @@ int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 			if (status == 1) {
 				if (!parseConfigInt(line, INT_MIN, INT_MAX, &parsed.pixelOffset[0]) ||
 					readConfigLine(file, line, sizeof(line)) != 1 ||
-					!parseConfigInt(line, INT_MIN, INT_MAX, &parsed.pixelOffset[1]) ||
-					readConfigLine(file, line, sizeof(line)) != 0) break;
+					!parseConfigInt(line, INT_MIN, INT_MAX, &parsed.pixelOffset[1])) break;
+				status = readConfigLine(file, line, sizeof(line));
+				if (status < 0) break;
+				if (status == 1 &&
+					(!parseConfigInt(line, 0, 0xFE, &secondaryHotkey[0]) ||
+					 readConfigLine(file, line, sizeof(line)) != 1 ||
+					 !parseConfigInt(line, 0, 7, &secondaryHotkey[1]) ||
+					 readConfigLine(file, line, sizeof(line)) != 0)) break;
 			}
 		}
 		result = 0;
@@ -131,6 +138,11 @@ int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 	if (result != 0) return result;
 
 	*config = parsed;
+	if (hs != NULL) {
+		hs->secondaryKeyCode = secondaryHotkey[0];
+		hs->secondaryModifierMask = secondaryHotkey[1];
+		hs->secondaryPrevAsyncState = false;
+	}
 	if (hs != NULL && hotkeyLines >= 2) {
 		hs->mode = (HotkeyMode)hotkey[0];
 		hs->keyCode = hotkey[1];
@@ -166,6 +178,8 @@ bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeySta
 	fprintf(file, "%d\n", hs->masterModifierMask);
 	fprintf(file, "%d\n", config->pixelOffset[0]);
 	fprintf(file, "%d\n", config->pixelOffset[1]);
+	fprintf(file, "%d\n", hs->secondaryKeyCode);
+	fprintf(file, "%d\n", hs->secondaryModifierMask);
 	bool success = ferror(file) == 0;
 	if (fclose(file) != 0) success = false;
 	return success;
