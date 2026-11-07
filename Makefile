@@ -8,8 +8,8 @@ CONSOLE_OBJS = obj\ConsoleMain.obj obj\ConsoleRivaCross.obj obj\GuiCore.obj obj\
 
 all: RivaCross.exe
 
-RivaCross.exe: $(GUI_OBJS)
-	$(LINK) /NOLOGO $(GUI_OBJS) /OUT:$@ /SUBSYSTEM:WINDOWS /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS)
+RivaCross.exe: $(GUI_OBJS) Makefile
+	$(LINK) /NOLOGO $(GUI_OBJS) /OUT:$@ /SUBSYSTEM:WINDOWS /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS) comctl32.lib gdiplus.lib
 
 ocat: RivaCrossOCAT.exe ocat\bin\RivaCrossOCATHook64.dll
 
@@ -22,7 +22,7 @@ RivaCrossOCAT.exe: $(OCAT_OBJS) Makefile
 console: RivaCrossConsole.exe
 
 RivaCrossConsole.exe: $(CONSOLE_OBJS)
-	$(LINK) /NOLOGO $(CONSOLE_OBJS) /OUT:$@ /SUBSYSTEM:CONSOLE /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS) advapi32.lib lib\pdcurses.lib
+	$(LINK) /NOLOGO $(CONSOLE_OBJS) /OUT:$@ /SUBSYSTEM:CONSOLE /MANIFESTUAC:level='requireAdministrator' $(WIN_LIBS) advapi32.lib gdiplus.lib lib\pdcurses.lib
 
 obj\GuiMain.obj: src\Main.cpp src\RivaCross.h src\RTSShared.h
 	$(CXX) $(CXXFLAGS) /c /Fo$@ src\Main.cpp

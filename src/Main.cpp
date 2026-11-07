@@ -2,9 +2,12 @@
 #ifdef RIVACROSS_OCAT
 #include "OCATShared.h"
 #include <tlhelp32.h>
+#else
+#include <commctrl.h>
 #endif
 
 #include <commdlg.h>
+#include <errno.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -18,10 +21,17 @@ enum ControlId {
 	IdHotkey, IdMaster, IdLoad, IdSaveAs, IdApply, IdVisible,
 	IdClipboard, IdKeep, IdStatus, IdLaunch, IdAttach, IdAttachWindow,
 	IdNudgeUp, IdNudgeDown, IdNudgeLeft, IdNudgeRight, IdWatch, IdStopWatch,
-	IdSecondaryHotkey
+	IdSecondaryHotkey, IdShape, IdLength, IdWidth, IdGap, IdOutline, IdPreview
 };
 
-#ifndef RIVACROSS_OCAT
+#ifdef RIVACROSS_OCAT
+static const int ShapeRowsHeight = 0;
+static const int ClientWidth = 520;
+static const int ClientHeight = 495;
+#else
+static const int ShapeRowsHeight = 144;
+static const int ClientWidth = 764;
+static const int ClientHeight = 445 + ShapeRowsHeight;
 static const char* const OsdEntry = "RivaCross_crosshair";
 #endif
 
@@ -49,6 +59,9 @@ struct AppState {
 	ULONGLONG trackedSince, lastStatusPoll;
 	bool noReplyYet;
 	bool targetStopped, targetStateUnknown, mappingLost;
+#else
+	HWND shape, length, width, widthLabel, gap, outline, preview;
+	HWND lengthValue, widthValue, gapValue;
 #endif
 	HWND captureTarget;
 	HFONT font;
@@ -120,6 +133,45 @@ static void refreshVisibility() {
 		app.hotkeyState.visible ? "Hide" : "Show");
 }
 
+#ifndef RIVACROSS_OCAT
+static int sliderValue(HWND slider) {
+	return (int)SendMessageA(slider, TBM_GETPOS, 0, 0);
+}
+
+static void refreshSliderValues() {
+	char text[16];
+	snprintf(text, sizeof(text), "%d", sliderValue(app.length));
+	SetWindowTextA(app.lengthValue, text);
+	const int width = sliderValue(app.width);
+	if (width == CrosshairHalfWidth) strcpy(text, "0.5");
+	else snprintf(text, sizeof(text), "%d", width);
+	SetWindowTextA(app.widthValue, text);
+	snprintf(text, sizeof(text), "%d", sliderValue(app.gap));
+	SetWindowTextA(app.gapValue, text);
+}
+
+static void refreshPreview() {
+	if (app.preview) InvalidateRect(app.preview, NULL, FALSE);
+}
+
+static void refreshShapeControls() {
+	const LRESULT style = SendMessageA(app.shape, CB_GETCURSEL, 0, 0);
+	const bool text = style == CrosshairText;
+	const bool dot = style == CrosshairDot;
+	EnableWindow(app.crosshair, text);
+	EnableWindow(app.scale, text);
+	EnableWindow(app.length, !text && !dot);
+	EnableWindow(app.gap, !text && !dot);
+	EnableWindow(app.width, !text);
+	EnableWindow(app.outline, !text);
+	EnableWindow(app.lengthValue, !text && !dot);
+	EnableWindow(app.gapValue, !text && !dot);
+	EnableWindow(app.widthValue, !text);
+	SetWindowTextA(app.widthLabel, dot ? "Diameter" : "Thickness");
+	refreshPreview();
+}
+#endif
+
 static void refreshControls() {
 	char text[96];
 	SetWindowTextA(app.crosshair, app.config.crosshair);
@@ -141,6 +193,16 @@ static void refreshControls() {
 	snprintf(text, sizeof(text), "#%02X%02X%02X%02X", app.config.color[0],
 		app.config.color[1], app.config.color[2], app.config.color[3]);
 	SetWindowTextA(app.color, text);
+#ifndef RIVACROSS_OCAT
+	const CrosshairDrawing& drawing = app.config.drawing;
+	SendMessageA(app.shape, CB_SETCURSEL, drawing.style, 0);
+	SendMessageA(app.length, TBM_SETPOS, TRUE, drawing.length);
+	SendMessageA(app.width, TBM_SETPOS, TRUE, drawing.width);
+	SendMessageA(app.gap, TBM_SETPOS, TRUE, drawing.gap);
+	refreshSliderValues();
+	SendMessageA(app.outline, BM_SETCHECK, drawing.outline ? BST_CHECKED : BST_UNCHECKED, 0);
+	refreshShapeControls();
+#endif
 	SendMessageA(app.mode, CB_SETCURSEL, app.hotkeyState.mode, 0);
 	refreshHotkeys();
 	refreshVisibility();
@@ -148,13 +210,29 @@ static void refreshControls() {
 
 static bool parseNumber(HWND field, int* value) {
 	char text[32];
-	GetWindowTextA(field, text, sizeof(text));
+	const int length = GetWindowTextA(field, text, sizeof(text));
+	if (!length || length == sizeof(text) - 1) return false;
 	char* end;
-	unsigned long parsed = strtoul(text, &end, 10);
-	if (!text[0] || *end || parsed > INT_MAX || text[0] == '-') return false;
+	errno = 0;
+	long parsed = strtol(text, &end, 10);
+	if (end == text || *end || errno == ERANGE || parsed < 0 || parsed > INT_MAX) return false;
 	*value = (int)parsed;
 	return true;
 }
+
+#ifndef RIVACROSS_OCAT
+static bool readDrawingControls(CrosshairDrawing& drawing) {
+	const LRESULT style = SendMessageA(app.shape, CB_GETCURSEL, 0, 0);
+	if (style < CrosshairText || style > CrosshairChevron) return false;
+	drawing.style = (CrosshairStyle)style;
+	if (drawing.style == CrosshairText) return true;
+	drawing.length = sliderValue(app.length);
+	drawing.width = sliderValue(app.width);
+	drawing.gap = sliderValue(app.gap);
+	drawing.outline = SendMessageA(app.outline, BM_GETCHECK, 0, 0) == BST_CHECKED;
+	return true;
+}
+#endif
 
 static int hexDigit(char c) {
 	if (c >= '0' && c <= '9') return c - '0';
@@ -163,39 +241,140 @@ static int hexDigit(char c) {
 	return -1;
 }
 
-static bool readControls() {
-	RTSSCrossConfig next = app.config;
+static const char* readAppearance(RTSSCrossConfig& next) {
+	bool usesTextSize = true;
+#ifndef RIVACROSS_OCAT
+	if (!readDrawingControls(next.drawing))
+		return "Select a crosshair style.";
+	usesTextSize = next.drawing.style == CrosshairText;
+#endif
 	GetWindowTextA(app.crosshair, next.crosshair, sizeof(next.crosshair));
-	int x, y, scale;
-	if (!parseNumber(app.x, &x) || !parseNumber(app.y, &y) ||
-		!parseNumber(app.scale, &scale)) {
-		MessageBoxA(app.window, "Position and size must be nonnegative whole numbers.",
-			"Invalid value", MB_OK | MB_ICONWARNING);
-		return false;
+	if (usesTextSize) {
+		int scale;
+		if (!parseNumber(app.scale, &scale)) return "Text size must be a nonnegative whole number.";
+		next.scale = (unsigned int)scale;
 	}
 	char color[16];
 	GetWindowTextA(app.color, color, sizeof(color));
-	size_t length = strlen(color);
-	if ((length != 7 && length != 9) || color[0] != '#') {
-		MessageBoxA(app.window, "Use #RRGGBB or #RRGGBBAA for the color.",
-			"Invalid color", MB_OK | MB_ICONWARNING);
+	const size_t length = strlen(color);
+	const char* colorError = "Use #RRGGBB or #RRGGBBAA for the color.";
+	if ((length != 7 && length != 9) || color[0] != '#') return colorError;
+	next.color[3] = 0xff;
+	for (size_t i = 0; i < (length - 1) / 2; ++i) {
+		const int high = hexDigit(color[1 + i * 2]);
+		const int low = hexDigit(color[2 + i * 2]);
+		if (high < 0 || low < 0) return colorError;
+		next.color[i] = (unsigned char)(high * 16 + low);
+	}
+	return NULL;
+}
+
+#ifndef RIVACROSS_OCAT
+static const COLORREF PreviewBackground = RGB(108, 116, 124);
+
+static COLORREF previewColor(const unsigned char rgba[4], bool outline = false) {
+	const int alpha = rgba[3];
+	const auto blend = [alpha](int channel, int background) {
+		return (channel * alpha + background * (255 - alpha) + 127) / 255;
+	};
+	return RGB(blend(outline ? 0 : rgba[0], GetRValue(PreviewBackground)),
+		blend(outline ? 0 : rgba[1], GetGValue(PreviewBackground)),
+		blend(outline ? 0 : rgba[2], GetBValue(PreviewBackground)));
+}
+
+static void fillPreviewRegion(HDC dc, HRGN region, COLORREF color) {
+	HBRUSH brush = CreateSolidBrush(color);
+	if (brush) {
+		FillRgn(dc, region, brush);
+		DeleteObject(brush);
+	}
+}
+
+static int paintPreviewShape(HDC dc, const RECT& area, const RTSSCrossConfig& draft) {
+	HRGN fill, outline;
+	if (!makeCrosshairRegions(draft.drawing, fill, outline)) return 0;
+	const int saved = SaveDC(dc);
+	RECT bounds;
+	int zoom = 0;
+	if (saved && GetRgnBox(outline ? outline : fill, &bounds) > NULLREGION) {
+		const int width = bounds.right - bounds.left;
+		const int height = bounds.bottom - bounds.top;
+		const int availableW = area.right - area.left;
+		const int availableH = area.bottom - area.top;
+		const int grid = crosshairGridScale(draft.drawing);
+		const int fittingZoom = imin((availableW - 8) * grid / width, (availableH - 8) * grid / height);
+		zoom = fittingZoom < 1 ? 1 : imin(4, fittingZoom);
+		IntersectClipRect(dc, area.left, area.top, area.right, area.bottom);
+		SetMapMode(dc, MM_ANISOTROPIC);
+		SetWindowExtEx(dc, grid, grid, NULL);
+		SetViewportExtEx(dc, zoom, zoom, NULL);
+		SetViewportOrgEx(dc, area.left + (availableW - MulDiv(width, zoom, grid)) / 2 -
+			MulDiv(bounds.left, zoom, grid),
+			area.top + (availableH - MulDiv(height, zoom, grid)) / 2 - MulDiv(bounds.top, zoom, grid), NULL);
+		if (outline) fillPreviewRegion(dc, outline, previewColor(draft.color, true));
+		fillPreviewRegion(dc, fill, previewColor(draft.color));
+	}
+	if (saved) RestoreDC(dc, saved);
+	if (outline) DeleteObject(outline);
+	DeleteObject(fill);
+	return zoom;
+}
+
+static void paintCrosshairPreview(HDC dc, RECT area) {
+	HBRUSH background = CreateSolidBrush(PreviewBackground);
+	if (!background) return;
+	FillRect(dc, &area, background);
+	DeleteObject(background);
+	const int saved = SaveDC(dc);
+	if (!saved) return;
+	SelectObject(dc, app.font);
+	SetBkMode(dc, TRANSPARENT);
+
+	RTSSCrossConfig draft = app.config;
+	char caption[64] = "Enter valid size and color";
+	if (!readAppearance(draft)) {
+		RECT sample = area;
+		sample.bottom -= 24;
+		if (draft.drawing.style == CrosshairText) {
+			// The game supplies its own RTSS font and shadow.
+			const int size = draft.scale > 500 ? 500 : (int)draft.scale;
+			const int height = MulDiv(18, size, 100);
+			HFONT font = CreateFontA(height ? -height : -1, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+				DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
+				DEFAULT_PITCH, "Segoe UI");
+			HGDIOBJ previous = font ? SelectObject(dc, font) : NULL;
+			SetTextColor(dc, previewColor(draft.color));
+			DrawTextA(dc, draft.crosshair, -1, &sample,
+				DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX | DT_END_ELLIPSIS);
+			if (font) {
+				if (previous) SelectObject(dc, previous);
+				DeleteObject(font);
+			}
+			strcpy(caption, "Text sample");
+		} else {
+			const int zoom = paintPreviewShape(dc, sample, draft);
+			if (zoom) snprintf(caption, sizeof(caption), "%dx shape preview", zoom);
+			else strcpy(caption, "Preview unavailable");
+		}
+		area.top = sample.bottom;
+	}
+	SetTextColor(dc, RGB(255, 255, 255));
+	DrawTextA(dc, caption, -1, &area, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+	RestoreDC(dc, saved);
+}
+#endif
+
+static bool readControls() {
+	RTSSCrossConfig next = app.config;
+	if (const char* error = readAppearance(next)) {
+		MessageBoxA(app.window, error, "Invalid crosshair settings", MB_OK | MB_ICONWARNING);
 		return false;
 	}
-	for (size_t i = 1; i < length; ++i) {
-		if (hexDigit(color[i]) < 0) {
-			MessageBoxA(app.window, "Use #RRGGBB or #RRGGBBAA for the color.",
-				"Invalid color", MB_OK | MB_ICONWARNING);
-			return false;
-		}
+	if (!parseNumber(app.x, &next.position[0]) || !parseNumber(app.y, &next.position[1])) {
+		MessageBoxA(app.window, "Position must use nonnegative whole numbers.",
+			"Invalid position", MB_OK | MB_ICONWARNING);
+		return false;
 	}
-	for (int i = 0; i < 3; ++i)
-		next.color[i] = (unsigned char)((hexDigit(color[1 + i * 2]) << 4) |
-			hexDigit(color[2 + i * 2]));
-	next.color[3] = length == 9
-		? (unsigned char)((hexDigit(color[7]) << 4) | hexDigit(color[8])) : 0xff;
-	next.position[0] = x;
-	next.position[1] = y;
-	next.scale = (unsigned int)scale;
 	int mode = (int)SendMessageA(app.mode, CB_GETCURSEL, 0, 0);
 	if (mode != HotkeyNone && !app.hotkeyState.keyCode && !app.hotkeyState.secondaryKeyCode) {
 		MessageBoxA(app.window, "Click the hotkey field and press a key, or disable the hotkey mode.",
@@ -221,8 +400,10 @@ static void updateOverlay() {
 	status(result == 0 ? "Settings ready. Check the crosshair in your game." :
 		"Could not create OCAT bridge. Close another RivaCrossOCAT or restart.");
 #else
-	status(result == 0 ? "Sent to RTSS; game display is not verified." :
+	status(result == 0 ? "Sent to RTSS. Check the crosshair in your game." :
 		result == -4 ? "RTSS is busy. Click Apply + Save again." :
+		result == RTSSDrawingUnsupported ? "Shapes need a newer RTSS. Select Text or update RTSS." :
+		result == RTSSDrawingFailed ? "Could not draw the crosshair shape." :
 		"RTSS is unavailable. Start RTSS, then click Apply + Save.");
 #endif
 }
@@ -1211,6 +1392,15 @@ static void pollHotkeys() {
 	hotkey->secondaryPrevAsyncState = secondaryPressed;
 }
 
+#ifndef RIVACROSS_OCAT
+static HWND createShapeSlider(int y, int id, int low, int high, HWND& value) {
+	HWND slider = control(TRACKBAR_CLASSA, "", WS_TABSTOP | TBS_NOTICKS, 140, y, 300, 28, id);
+	SendMessageA(slider, TBM_SETRANGE, TRUE, MAKELPARAM(low, high));
+	value = control("STATIC", "", SS_RIGHT, 450, y + 3, 50, 22);
+	return slider;
+}
+#endif
+
 static void createControls() {
 	HDC dc = GetDC(app.window);
 	int dpi = dc ? GetDeviceCaps(dc, LOGPIXELSY) : 96;
@@ -1233,38 +1423,62 @@ static void createControls() {
 	control("BUTTON", "v", WS_TABSTOP, 405, 77, 28, 24, IdNudgeDown);
 	control("BUTTON", ">", WS_TABSTOP, 440, 77, 28, 24, IdNudgeRight);
 	app.pixelOffset = control("STATIC", "", 0, 255, 106, 245, 22);
+#ifdef RIVACROSS_OCAT
 	control("STATIC", "Size", 0, 20, 105, 110, 22);
+#else
+	control("STATIC", "Text size", 0, 20, 105, 110, 22);
+#endif
 	app.scale = control("EDIT", "", WS_BORDER | WS_TABSTOP | ES_NUMBER,
 		140, 102, 100, 25, IdScale);
 	control("STATIC", "Color", 0, 20, 145, 110, 22);
 	app.color = control("EDIT", "", WS_BORDER | WS_TABSTOP | ES_AUTOHSCROLL,
 		140, 142, 170, 25, IdColor);
 	control("STATIC", "#RRGGBB or #RRGGBBAA", 0, 320, 145, 190, 22);
-	control("STATIC", "Hotkey mode", 0, 20, 185, 110, 22);
+#ifndef RIVACROSS_OCAT
+	INITCOMMONCONTROLSEX bars = {sizeof(bars), ICC_BAR_CLASSES};
+	InitCommonControlsEx(&bars);
+	control("STATIC", "Crosshair style", 0, 20, 185, 110, 22);
+	app.shape = control("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST,
+		140, 182, 160, 160, IdShape);
+	const char* styles[] = {"Text", "Cross", "Dot", "T-shape", "Chevron (^)"};
+	for (const char* name : styles)
+		SendMessageA(app.shape, CB_ADDSTRING, 0, (LPARAM)name);
+	app.outline = control("BUTTON", "Black outline", WS_TABSTOP | BS_AUTOCHECKBOX,
+		320, 182, 180, 25, IdOutline);
+	control("STATIC", "Arm length", 0, 20, 225, 110, 22);
+	app.length = createShapeSlider(222, IdLength, 1, CrosshairMaxLength, app.lengthValue);
+	app.widthLabel = control("STATIC", "Thickness", 0, 20, 257, 110, 22);
+	app.width = createShapeSlider(254, IdWidth, CrosshairHalfWidth, CrosshairMaxWidth, app.widthValue);
+	control("STATIC", "Gap", 0, 20, 289, 110, 22);
+	app.gap = createShapeSlider(286, IdGap, 0, CrosshairMaxGap, app.gapValue);
+	control("STATIC", "Live preview", 0, 520, 25, 224, 22);
+	app.preview = control("STATIC", "", SS_OWNERDRAW | WS_BORDER, 520, 52, 224, 248, IdPreview);
+	control("STATIC", "Apply + Save updates the game.", 0, 520, 309, 224, 40);
+#endif
+	control("STATIC", "Hotkey mode", 0, 20, 185 + ShapeRowsHeight, 110, 22);
 	app.mode = control("COMBOBOX", "", WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
-		140, 182, 115, 110, IdMode);
+		140, 182 + ShapeRowsHeight, 115, 110, IdMode);
 	SendMessageA(app.mode, CB_ADDSTRING, 0, (LPARAM)"Disabled");
 	SendMessageA(app.mode, CB_ADDSTRING, 0, (LPARAM)"Hold");
 	SendMessageA(app.mode, CB_ADDSTRING, 0, (LPARAM)"Toggle");
 	app.hotkey = control("BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON,
-		270, 182, 230, 27, IdHotkey);
-	control("STATIC", "Hotkey 2 (OR)", 0, 20, 225, 110, 22);
+		270, 182 + ShapeRowsHeight, 230, 27, IdHotkey);
+	control("STATIC", "Hotkey 2 (OR)", 0, 20, 225 + ShapeRowsHeight, 110, 22);
 	app.secondaryHotkey = control("BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON,
-		140, 222, 360, 27, IdSecondaryHotkey);
-	control("STATIC", "Master toggle", 0, 20, 265, 110, 22);
+		140, 222 + ShapeRowsHeight, 360, 27, IdSecondaryHotkey);
+	control("STATIC", "Master toggle", 0, 20, 265 + ShapeRowsHeight, 110, 22);
 	app.master = control("BUTTON", "", WS_TABSTOP | BS_PUSHBUTTON,
-		140, 262, 360, 27, IdMaster);
+		140, 262 + ShapeRowsHeight, 360, 27, IdMaster);
 	app.buttonProc = (WNDPROC)SetWindowLongPtrA(app.hotkey, GWLP_WNDPROC, (LONG_PTR)captureProc);
 	SetWindowLongPtrA(app.secondaryHotkey, GWLP_WNDPROC, (LONG_PTR)captureProc);
 	SetWindowLongPtrA(app.master, GWLP_WNDPROC, (LONG_PTR)captureProc);
-	control("BUTTON", "Load...", WS_TABSTOP, 20, 310, 95, 30, IdLoad);
-	control("BUTTON", "Save As...", WS_TABSTOP, 125, 310, 105, 30, IdSaveAs);
+	control("BUTTON", "Load...", WS_TABSTOP, 20, 310 + ShapeRowsHeight, 95, 30, IdLoad);
+	control("BUTTON", "Save As...", WS_TABSTOP, 125, 310 + ShapeRowsHeight, 105, 30, IdSaveAs);
 	control("BUTTON", "Apply + Save", WS_TABSTOP | BS_DEFPUSHBUTTON,
-		240, 310, 125, 30, IdApply);
-	app.visibleButton = control("BUTTON", "Hide", WS_TABSTOP,
-		375, 310, 125, 30, IdVisible);
+		240, 310 + ShapeRowsHeight, 125, 30, IdApply);
+	app.visibleButton = control("BUTTON", "Hide", WS_TABSTOP, 375, 310 + ShapeRowsHeight, 125, 30, IdVisible);
 	control("BUTTON", "Clear clipboard...", WS_TABSTOP,
-		20, 355, 150, 28, IdClipboard);
+		20, 355 + ShapeRowsHeight, 150, 28, IdClipboard);
 #ifdef RIVACROSS_OCAT
 	control("BUTTON", "Launch game...", WS_TABSTOP,
 		190, 355, 150, 28, IdLaunch);
@@ -1279,13 +1493,13 @@ static void createControls() {
 	EnableWindow(app.stopWatch, FALSE);
 #else
 	app.keep = control("BUTTON", "Leave crosshair visible when closing",
-		WS_TABSTOP | BS_AUTOCHECKBOX, 190, 355, 310, 28, IdKeep);
+		WS_TABSTOP | BS_AUTOCHECKBOX, 190, 355 + ShapeRowsHeight, 310, 28, IdKeep);
 #endif
 #ifdef RIVACROSS_OCAT
 	app.status = control("STATIC", "", 0, 20, 426, 490, 22, IdStatus);
 	app.renderStatus = control("STATIC", "", 0, 20, 449, 490, 35);
 #else
-	app.status = control("STATIC", "", 0, 20, 405, 490, 22, IdStatus);
+	app.status = control("STATIC", "", 0, 20, 405 + ShapeRowsHeight, 490, 22, IdStatus);
 #endif
 }
 
@@ -1319,8 +1533,24 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 		SetTimer(hwnd, 1, 10, NULL);
 		return 0;
 	case WM_COMMAND:
+#ifndef RIVACROSS_OCAT
+		if (HIWORD(wParam) == EN_CHANGE) {
+			switch (LOWORD(wParam)) {
+			case IdCrosshair: case IdScale: case IdColor:
+				refreshPreview();
+				return 0;
+			}
+		}
+		if (LOWORD(wParam) == IdShape && HIWORD(wParam) == CBN_SELCHANGE) {
+			refreshShapeControls();
+			return 0;
+		}
+#endif
 		if (HIWORD(wParam) == BN_CLICKED) {
 			switch (LOWORD(wParam)) {
+#ifndef RIVACROSS_OCAT
+			case IdOutline: refreshPreview(); return 0;
+#endif
 			case IdHotkey:
 			case IdSecondaryHotkey:
 			case IdMaster:
@@ -1371,6 +1601,24 @@ static LRESULT CALLBACK windowProc(HWND hwnd, UINT message, WPARAM wParam, LPARA
 			return 0;
 		}
 		break;
+#ifndef RIVACROSS_OCAT
+	case WM_HSCROLL: {
+		HWND slider = (HWND)lParam;
+		if (slider && (slider == app.length || slider == app.width || slider == app.gap)) {
+			refreshSliderValues();
+			refreshPreview();
+			return 0;
+		}
+		break;
+	}
+	case WM_DRAWITEM:
+		if (wParam == IdPreview) {
+			const auto* item = reinterpret_cast<const DRAWITEMSTRUCT*>(lParam);
+			paintCrosshairPreview(item->hDC, item->rcItem);
+			return TRUE;
+		}
+		break;
+#endif
 	case WM_APP + 1:
 		beginCapture(wParam == IdHotkey ? app.hotkey :
 			wParam == IdSecondaryHotkey ? app.secondaryHotkey : app.master);
@@ -1432,13 +1680,7 @@ int WINAPI WinMain(HINSTANCE instance, HINSTANCE, LPSTR arguments, int show) {
 	wc.hCursor = LoadCursor(NULL, IDC_ARROW);
 	wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
 	if (!RegisterClassA(&wc)) return 1;
-	RECT size = { 0, 0, 520,
-#ifdef RIVACROSS_OCAT
-		495
-#else
-		445
-#endif
-	};
+	RECT size = { 0, 0, ClientWidth, ClientHeight };
 	AdjustWindowRect(&size, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE);
 	HWND window = CreateWindowExA(0, wc.lpszClassName,
 #ifdef RIVACROSS_OCAT

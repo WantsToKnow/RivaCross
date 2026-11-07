@@ -4,8 +4,8 @@ RivaCross - Customizable Crosshair Overlay
 Adds a customizable crosshair to MSI Afterburner /
 RivaTuner Statistics Server
 
-The default build uses a feature in RivaTuner Statistics Server (RTSS)
-that enables the addition of custom text to the RTSS on screen display (OSD).<br>
+The default build displays custom text or drawn crosshairs through the
+RivaTuner Statistics Server (RTSS) on-screen display (OSD).<br>
 The Windows GUI lets you customize the crosshair without opening a console.
 
 Examples
@@ -31,7 +31,8 @@ Usage
 
 1. Open MSI Afterburner / RivaTuner Statistics Server
 1. Execute `RivaCross.exe`
-1. Edit the crosshair text, X/Y position, size, and RGBA color
+1. Choose **Text**, **Cross**, **Dot**, **T-shape**, or **Chevron (^)** under **Crosshair style**
+1. Set the X/Y position, RGBA color, and the settings for the selected style
 1. Click **Apply + Save** to update RTSS and save the active preset
 
 Use **Load** to switch presets and **Save As** to create one. The default preset
@@ -53,7 +54,26 @@ the RTSS overlay unless "Leave crosshair visible when closing" is checked.
 The arrow buttons beside X/Y adjust one RTSS position unit per click and save
 immediately; the on-screen pixel distance depends on RTSS's OSD settings.
 
+**Cross**, **T-shape**, and **Chevron (^)** use arm length, thickness, and gap.
+Drag the sliders to edit the shape, or focus a slider and use the arrow keys.
+Set the gap to zero to join the arms. **Dot** uses diameter. Thickness and
+diameter start at 0.5 OSD units, which draws a one-pixel stroke or dot at 2×
+RTSS zoom. **Black outline** adds a one-unit rim, or a half-unit rim at the
+thinnest setting. The **Live preview** shows the current edits centered at up
+to 4× magnification. Shape X/Y and RTSS zoom set the position and scale
+in-game. Shape rendering has been tested with RTSS 7.3.5. Existing
+text presets open in **Text** mode. The text sample uses the window font,
+and the game uses the RTSS profile's font and shadow.
+
 The previous text interface is available as the optional `RivaCrossConsole.exe` build.
+
+Development scope
+-----------------
+
+The actively maintained version is the RTSS-based `RivaCross.exe`. The optional
+OCAT-based build is currently on hold and should be treated as frozen. Unless a
+task explicitly says otherwise, subsequent feature changes apply only to the
+RTSS version.
 
 Optional OCAT build
 -------------------
@@ -192,8 +212,7 @@ needs a MinGW-built `lib/pdcurses.a`.
 
 Limitations
 -----------
-* The crosshair is limited to one line of text
-  - any further work in this direction is unlikely
+* Text-mode crosshairs are limited to one line
 * The optional text interface does not necessarily understand all keys
   - probably a limitation of the technology and not easily fixable
 * Availability of colorization and scaling features depend on RTSS rendering mode

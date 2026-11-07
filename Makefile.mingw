@@ -8,7 +8,7 @@ CONSOLE_OBJS = obj/ConsoleMain.o obj/RivaCross.o obj/Core.o obj/RTSShared.o
 all: RivaCross.exe
 
 RivaCross.exe: $(GUI_OBJS)
-	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS)
+	$(CXX) -mwindows -o $@ $^ $(WIN_LIBS) -lcomctl32 -lgdiplus
 
 ocat: RivaCrossOCAT.exe ocat/bin/RivaCrossOCATHook64.dll
 
@@ -21,7 +21,7 @@ RivaCrossOCAT.exe: $(OCAT_OBJS)
 console: RivaCrossConsole.exe
 
 RivaCrossConsole.exe: $(CONSOLE_OBJS)
-	$(CXX) -o $@ $^ lib/pdcurses.a $(WIN_LIBS)
+	$(CXX) -o $@ $^ lib/pdcurses.a $(WIN_LIBS) -lgdiplus
 
 obj/%.o: src/%.cpp
 	$(CXX) -c $(CXXFLAGS) -o $@ $<

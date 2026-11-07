@@ -322,6 +322,11 @@ typedef struct RTSSharedMemory {
 		BYTE	buffer[262144];
 			//OSD slot data buffer
 
+		//next field is valid for v2.20 and newer shared memory format only
+
+		char	szOSDEx2[32768];
+			//additional extended OSD slot text
+
 	} RTSSharedMemoryOSDEntry;
 
 	//application descriptor structure
@@ -497,14 +502,45 @@ typedef struct RTSSEmbeddedObjectGraph {
 
 } RTSSEmbeddedObjectGraph;
 
+enum CrosshairStyle {
+	CrosshairText, CrosshairCross, CrosshairDot, CrosshairT, CrosshairChevron
+};
+
+enum {
+	CrosshairHalfWidth = 0,
+	CrosshairMaxLength = 64,
+	CrosshairMaxWidth = 16,
+	CrosshairMaxGap = 32
+};
+
+struct CrosshairDrawing {
+	CrosshairStyle style = CrosshairText;
+	int length = 6;
+	int width = 2; // OSD units. CrosshairHalfWidth represents 0.5.
+	int gap = 2;
+	bool outline = false;
+};
+
+inline int crosshairGridScale(const CrosshairDrawing& drawing) {
+	return drawing.width == CrosshairHalfWidth ? 2 : 1;
+}
+
 typedef struct RTSSCrossConfig {
 	char crosshair[64]; // crosshair text
 	int position[2]; // position on screen (coordinate system determined by RTSS)
 	int pixelOffset[2]; // fine adjustment in rendered pixels, added after OCAT scaling
 	unsigned int scale; // crosshair size (usage depends on RTSS configuration)
 	unsigned char color[4]; // color in RGBA format
+	CrosshairDrawing drawing;
 } RTSSCrossConfig;
 
+enum {
+	RTSSDrawingUnsupported = -5,
+	RTSSDrawingFailed = -6
+};
+
+// On success, the caller owns the fill and any outline region.
+bool makeCrosshairRegions(const CrosshairDrawing& drawing, HRGN& fill, HRGN& outline);
 int RTSSUpdateOSDEntry(const RTSSCrossConfig* config, const char* osdEntry);
 int RTSSUpdateOSDVisibility(const RTSSCrossConfig* config, const char* osdEntry, bool visible);
 int RTSSReleaseOSDEntry(const char* osdEntry);

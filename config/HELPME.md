@@ -12,6 +12,13 @@ l11: fine X offset (optional; signed RTSS units or OCAT pixels)
 l12: fine Y offset (optional; signed RTSS units or OCAT pixels)
 l13: second hotkey VK code (optional; 0=disabled; either hotkey triggers)
 l14: second hotkey modifier mask (optional; 0=none, 1=Ctrl, 2=Shift, 4=Alt)
+l15: RTSS shape style (1=Cross, 2=Dot, 3=T-shape, 4=Chevron)
+l16: arm length (1-64 RTSS units)
+l17: thickness or dot diameter (0 for 0.5 RTSS units, otherwise 1-16)
+l18: arm gap (0-32 RTSS units)
+l19: black outline (0=off, 1=on)
+
+Shape presets include all 19 lines. Text presets omit lines 15-19.
 
 The second hotkey shares the main hotkey's hold/toggle mode. In hold mode,
 the crosshair stays visible while either binding is held. In both GUIs,

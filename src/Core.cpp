@@ -20,6 +20,7 @@ bool initConfig(RTSSCrossConfig* config) {
 	config->color[2] = 0xFF;
 	config->color[3] = 0xFF;
 	config->scale = 100;
+	config->drawing = {};
 	return true;
 }
 // Return 1 for a line, 0 for EOF, -1 for a line that cannot fit the field.
@@ -82,6 +83,26 @@ static bool parseConfigColor(char* line, unsigned char color[4]) {
 	return true;
 }
 
+static bool readOptionalDrawing(FILE* file, CrosshairDrawing& drawing) {
+	char line[128];
+	const int status = readConfigLine(file, line, sizeof(line));
+	if (status == 0) return true;
+	int style, outline;
+	if (status != 1 || !parseConfigInt(line, CrosshairCross, CrosshairChevron, &style) ||
+		readConfigLine(file, line, sizeof(line)) != 1 ||
+		!parseConfigInt(line, 1, CrosshairMaxLength, &drawing.length) ||
+		readConfigLine(file, line, sizeof(line)) != 1 ||
+		!parseConfigInt(line, CrosshairHalfWidth, CrosshairMaxWidth, &drawing.width) ||
+		readConfigLine(file, line, sizeof(line)) != 1 ||
+		!parseConfigInt(line, 0, CrosshairMaxGap, &drawing.gap) ||
+		readConfigLine(file, line, sizeof(line)) != 1 ||
+		!parseConfigInt(line, 0, 1, &outline) ||
+		readConfigLine(file, line, sizeof(line)) != 0) return false;
+	drawing.style = (CrosshairStyle)style;
+	drawing.outline = outline != 0;
+	return true;
+}
+
 int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 	if (configPath == NULL || config == NULL) return -1;
 	FILE* file = fopen(configPath, "r");
@@ -129,7 +150,7 @@ int loadConfig(char* configPath, RTSSCrossConfig* config, HotkeyState* hs) {
 					(!parseConfigInt(line, 0, 0xFE, &secondaryHotkey[0]) ||
 					 readConfigLine(file, line, sizeof(line)) != 1 ||
 					 !parseConfigInt(line, 0, 7, &secondaryHotkey[1]) ||
-					 readConfigLine(file, line, sizeof(line)) != 0)) break;
+					 !readOptionalDrawing(file, parsed.drawing))) break;
 			}
 		}
 		result = 0;
@@ -180,6 +201,10 @@ bool saveConfigToFile(const char* configPath, RTSSCrossConfig* config, HotkeySta
 	fprintf(file, "%d\n", config->pixelOffset[1]);
 	fprintf(file, "%d\n", hs->secondaryKeyCode);
 	fprintf(file, "%d\n", hs->secondaryModifierMask);
+	const CrosshairDrawing& drawing = config->drawing;
+	if (drawing.style != CrosshairText)
+		fprintf(file, "%d\n%d\n%d\n%d\n%d\n", drawing.style, drawing.length,
+			drawing.width, drawing.gap, drawing.outline ? 1 : 0);
 	bool success = ferror(file) == 0;
 	if (fclose(file) != 0) success = false;
 	return success;
